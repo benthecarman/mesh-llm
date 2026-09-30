@@ -5,7 +5,7 @@ use super::installed::{
 use super::schema_validation::strict_plugin_schema_availability;
 use super::{
     BLOBSTORE_PLUGIN_ID, PAYMENTS_PLUGIN_ID, PluginStartupOptions, PluginSummary,
-    WALLET_LEXE_PLUGIN_ID,
+    WALLET_LEXE_PLUGIN_ID, WALLET_NWC_PLUGIN_ID,
 };
 use crate::{
     MeshRequirementRejectReason, MeshRequirements, NodeVersionBounds, ProtocolGenerationBounds,
@@ -295,23 +295,30 @@ pub fn resolve_plugins(config: &MeshConfig, _host_mode: PluginHostMode) -> Resul
     let mut blobstore_enabled = true;
     let mut wallet_lexe_enabled = true;
     let mut payments_enabled = true;
+    // Off unless configured: it has nothing to connect to without `args`.
+    let mut wallet_nwc_args = None;
     for entry in &config.plugins {
         if names.insert(entry.name.clone(), ()).is_some() {
             bail!("Duplicate plugin entry '{}'", entry.name);
         }
         let enabled = entry.enabled.unwrap_or(true);
         if entry.name == BLOBSTORE_PLUGIN_ID {
-            ensure_builtin_entry_only_toggles_enabled(entry)?;
+            ensure_builtin_entry_is_valid(entry, false)?;
             blobstore_enabled = enabled;
             continue;
         }
         if entry.name == WALLET_LEXE_PLUGIN_ID {
-            ensure_builtin_entry_only_toggles_enabled(entry)?;
+            ensure_builtin_entry_is_valid(entry, false)?;
             wallet_lexe_enabled = enabled;
             continue;
         }
+        if entry.name == WALLET_NWC_PLUGIN_ID {
+            ensure_builtin_entry_is_valid(entry, true)?;
+            wallet_nwc_args = enabled.then(|| entry.args.clone());
+            continue;
+        }
         if entry.name == PAYMENTS_PLUGIN_ID {
-            ensure_builtin_entry_only_toggles_enabled(entry)?;
+            ensure_builtin_entry_is_valid(entry, false)?;
             payments_enabled = enabled;
             continue;
         }
@@ -332,8 +339,13 @@ pub fn resolve_plugins(config: &MeshConfig, _host_mode: PluginHostMode) -> Resul
     if blobstore_enabled {
         externals.push(builtin_plugin_spec(BLOBSTORE_PLUGIN_ID, &[])?);
     }
-    if wallet_lexe_enabled && wallet_lexe_compiled_in() {
+    if wallet_lexe_enabled && builtin_wallet_compiled_in(cfg!(feature = "wallet-lexe")) {
         externals.push(builtin_plugin_spec(WALLET_LEXE_PLUGIN_ID, &[])?);
+    }
+    if let Some(args) = wallet_nwc_args
+        && builtin_wallet_compiled_in(cfg!(feature = "wallet-nwc"))
+    {
+        externals.push(builtin_plugin_spec(WALLET_NWC_PLUGIN_ID, &args)?);
     }
     if payments_enabled && payments_compiled_in() {
         externals.push(in_process_builtin_spec(PAYMENTS_PLUGIN_ID));
@@ -345,42 +357,47 @@ pub fn resolve_plugins(config: &MeshConfig, _host_mode: PluginHostMode) -> Resul
     })
 }
 
-/// Built-in plugins are served by this executable; the only thing an operator
-/// may change about them is whether they run.
-fn ensure_builtin_entry_only_toggles_enabled(entry: &PluginConfigEntry) -> Result<()> {
+/// Built-in plugins are served by this executable. An operator may switch one
+/// off and, when `takes_args`, pass it `args`; nothing else about how it runs.
+fn ensure_builtin_entry_is_valid(entry: &PluginConfigEntry, takes_args: bool) -> Result<()> {
+    let allowed = if takes_args {
+        "`enabled` and `args`"
+    } else {
+        "`enabled`"
+    };
     if entry.command.is_some()
-        || !entry.args.is_empty()
+        || (!takes_args && !entry.args.is_empty())
         || entry.url.is_some()
         || !entry.startup.is_default()
     {
         bail!(
-            "Plugin '{}' is served by mesh-llm itself; only `enabled` may be set",
+            "Plugin '{}' is served by mesh-llm itself; only {allowed} may be set",
             entry.name
         );
     }
     Ok(())
 }
 
-/// Whether this build carries the built-in Lexe wallet. A `[[plugin]]
-/// name = "wallet-lexe"` stanza stays valid in a build without it (the
-/// documented off switch must not break a wallet-free SDK host); the plugin is
-/// simply not registered.
+/// Whether this build carries a built-in wallet, given whether its cargo
+/// feature is on. A `[[plugin]]` stanza naming one stays valid in a build
+/// without it (the documented off switch must not break a wallet-free SDK
+/// host); the plugin is simply not registered.
 ///
 /// Under test the answer is forced per thread and defaults to "absent", so the
 /// many resolver tests that count plugins are independent of the cargo
 /// features the test binary happened to be built with.
 #[cfg(not(test))]
-fn wallet_lexe_compiled_in() -> bool {
-    cfg!(feature = "wallet-lexe")
+fn builtin_wallet_compiled_in(feature_enabled: bool) -> bool {
+    feature_enabled
 }
 
 #[cfg(test)]
-fn wallet_lexe_compiled_in() -> bool {
-    TEST_WALLET_LEXE_COMPILED_IN.with(|slot| slot.borrow().unwrap_or(false))
+fn builtin_wallet_compiled_in(_feature_enabled: bool) -> bool {
+    TEST_BUILTIN_WALLETS_COMPILED_IN.with(|slot| slot.borrow().unwrap_or(false))
 }
 
 /// Whether this build carries the payments engine. Forced per thread under
-/// test for the same reason as [`wallet_lexe_compiled_in`].
+/// test for the same reason as [`builtin_wallet_compiled_in`].
 #[cfg(not(test))]
 fn payments_compiled_in() -> bool {
     cfg!(feature = "payments")
@@ -417,7 +434,7 @@ pub fn in_process_builtin_spec(name: &str) -> ExternalPluginSpec {
 
 #[cfg(test)]
 thread_local! {
-    pub(super) static TEST_WALLET_LEXE_COMPILED_IN: std::cell::RefCell<Option<bool>> =
+    pub(super) static TEST_BUILTIN_WALLETS_COMPILED_IN: std::cell::RefCell<Option<bool>> =
         const { std::cell::RefCell::new(None) };
 }
 

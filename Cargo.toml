@@ -9,6 +9,7 @@ members = [
     "crates/mesh-llm-payments-types",
     "crates/mesh-llm-wallet",
     "crates/mesh-wallet-lexe",
+    "crates/mesh-wallet-nwc",
     "crates/mesh-llm-events",
     "crates/mesh-llm-build-info",
     "crates/mesh-llm-gpu-bench",

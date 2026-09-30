@@ -16,6 +16,10 @@ payments = ["mesh-llm-host-runtime/payments", "dep:mesh-llm-payments"]
 # Built-in Lexe wallet, served as `mesh-llm --plugin wallet-lexe` like
 # blobstore. The only feature that links Lexe into this executable.
 wallet-lexe = ["payments", "mesh-llm-host-runtime/wallet-lexe"]
+# Built-in Nostr Wallet Connect wallet, served as `mesh-llm --plugin
+# wallet-nwc`. Not a default: opt in with MESH_LLM_WALLET_NWC=1. When compiled
+# in it still stays off until configured with a `[[plugin]]` stanza.
+wallet-nwc = ["payments", "mesh-llm-host-runtime/wallet-nwc"]
 
 [lints]
 workspace = true

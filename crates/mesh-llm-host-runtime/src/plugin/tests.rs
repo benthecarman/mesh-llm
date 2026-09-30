@@ -54,24 +54,26 @@ fn resolves_default_builtin_plugins() {
     assert!(resolved.inactive.is_empty());
 }
 
-/// Force whether the built-in wallet counts as compiled in; cleared on drop.
-struct WalletLexeBuild;
+/// Force whether the built-in wallets count as compiled in; cleared on drop.
+struct BuiltinWalletsBuild;
 
-impl WalletLexeBuild {
+impl BuiltinWalletsBuild {
     fn present() -> Self {
-        super::config::TEST_WALLET_LEXE_COMPILED_IN.with(|slot| *slot.borrow_mut() = Some(true));
+        super::config::TEST_BUILTIN_WALLETS_COMPILED_IN
+            .with(|slot| *slot.borrow_mut() = Some(true));
         Self
     }
 
     fn absent() -> Self {
-        super::config::TEST_WALLET_LEXE_COMPILED_IN.with(|slot| *slot.borrow_mut() = Some(false));
+        super::config::TEST_BUILTIN_WALLETS_COMPILED_IN
+            .with(|slot| *slot.borrow_mut() = Some(false));
         Self
     }
 }
 
-impl Drop for WalletLexeBuild {
+impl Drop for BuiltinWalletsBuild {
     fn drop(&mut self) {
-        super::config::TEST_WALLET_LEXE_COMPILED_IN.with(|slot| *slot.borrow_mut() = None);
+        super::config::TEST_BUILTIN_WALLETS_COMPILED_IN.with(|slot| *slot.borrow_mut() = None);
     }
 }
 
@@ -121,7 +123,7 @@ fn builtin_payments_is_served_in_process_and_can_be_switched_off() {
 
 #[test]
 fn builtin_wallet_is_served_by_this_executable_like_blobstore() {
-    let _build = WalletLexeBuild::present();
+    let _build = BuiltinWalletsBuild::present();
     let resolved = resolve_plugins(&MeshConfig::default(), private_host_mode()).unwrap();
     let names: Vec<_> = resolved.externals.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, [BLOBSTORE_PLUGIN_ID, WALLET_LEXE_PLUGIN_ID]);
@@ -177,7 +179,7 @@ async fn builtin_plugin_without_arguments_refuses_them() {
 
 #[test]
 fn builtin_wallet_is_not_registered_in_a_build_without_it() {
-    let _build = WalletLexeBuild::absent();
+    let _build = BuiltinWalletsBuild::absent();
     let resolved = resolve_plugins(&MeshConfig::default(), private_host_mode()).unwrap();
     assert_eq!(resolved.externals.len(), 1);
     assert_eq!(resolved.externals[0].name, BLOBSTORE_PLUGIN_ID);
@@ -185,7 +187,7 @@ fn builtin_wallet_is_not_registered_in_a_build_without_it() {
 
 #[test]
 fn builtin_wallet_can_be_disabled_at_runtime() {
-    let _build = WalletLexeBuild::present();
+    let _build = BuiltinWalletsBuild::present();
     let config = MeshConfig {
         plugins: vec![wallet_entry(Some(false))],
         defaults: None,
@@ -201,7 +203,7 @@ fn builtin_wallet_can_be_disabled_at_runtime() {
 fn wallet_stanza_is_accepted_by_a_build_without_the_wallet() {
     // The documented off switch must not turn a wallet-free SDK host into
     // a startup failure, and `enabled = true` there registers nothing.
-    let _build = WalletLexeBuild::absent();
+    let _build = BuiltinWalletsBuild::absent();
     for enabled in [Some(true), Some(false), None] {
         let config = MeshConfig {
             plugins: vec![wallet_entry(enabled)],
@@ -218,7 +220,7 @@ fn wallet_stanza_is_accepted_by_a_build_without_the_wallet() {
 
 #[test]
 fn builtin_wallet_rejects_command_url_args_and_startup_overrides() {
-    let _build = WalletLexeBuild::present();
+    let _build = BuiltinWalletsBuild::present();
     let mut with_command = wallet_entry(Some(true));
     with_command.command = Some("/opt/wallets/my-wallet".into());
     let mut with_url = wallet_entry(Some(true));
@@ -243,11 +245,97 @@ fn builtin_wallet_rejects_command_url_args_and_startup_overrides() {
     }
 }
 
+fn nwc_entry(enabled: Option<bool>, args: &[&str]) -> PluginConfigEntry {
+    PluginConfigEntry {
+        name: WALLET_NWC_PLUGIN_ID.into(),
+        args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        ..wallet_entry(enabled)
+    }
+}
+
+fn resolve_nwc(entry: PluginConfigEntry) -> Option<ExternalPluginSpec> {
+    let config = MeshConfig {
+        plugins: vec![entry],
+        defaults: None,
+        ..MeshConfig::default()
+    };
+    resolve_plugins(&config, private_host_mode())
+        .unwrap()
+        .externals
+        .into_iter()
+        .find(|spec| spec.name == WALLET_NWC_PLUGIN_ID)
+}
+
+#[test]
+fn nwc_wallet_runs_only_when_configured_and_receives_its_args() {
+    let _build = BuiltinWalletsBuild::present();
+    let default = resolve_plugins(&MeshConfig::default(), private_host_mode()).unwrap();
+    assert!(
+        default
+            .externals
+            .iter()
+            .all(|spec| spec.name != WALLET_NWC_PLUGIN_ID),
+        "an unconfigured NWC wallet has nothing to connect to"
+    );
+
+    let spec = resolve_nwc(nwc_entry(None, &["--uri-file", "/home/me/nwc-uri"]))
+        .expect("a configured NWC wallet starts");
+    assert_eq!(
+        spec.args,
+        [
+            "--log-format",
+            "json",
+            "--plugin",
+            WALLET_NWC_PLUGIN_ID,
+            "--plugin-arg=--uri-file",
+            "--plugin-arg=/home/me/nwc-uri",
+        ]
+    );
+    assert!(spec.startup.optional);
+
+    let disabled = nwc_entry(Some(false), &["--uri-file", "/home/me/nwc-uri"]);
+    assert!(resolve_nwc(disabled).is_none());
+}
+
+#[test]
+fn nwc_wallet_is_not_registered_in_a_build_without_it() {
+    let _build = BuiltinWalletsBuild::absent();
+    assert!(resolve_nwc(nwc_entry(None, &["--uri-file", "/home/me/nwc-uri"])).is_none());
+}
+
+#[test]
+fn nwc_wallet_takes_args_but_not_a_command_url_or_startup_override() {
+    let _build = BuiltinWalletsBuild::present();
+    let mut with_command = nwc_entry(None, &[]);
+    with_command.command = Some("/opt/wallets/my-wallet".into());
+    let mut with_url = nwc_entry(None, &[]);
+    with_url.url = Some("http://example.test".into());
+    let mut with_startup = nwc_entry(None, &[]);
+    with_startup.startup = PluginStartupConfig {
+        init_timeout_secs: Some(5),
+        ..PluginStartupConfig::default()
+    };
+    for entry in [with_command, with_url, with_startup] {
+        let config = MeshConfig {
+            plugins: vec![entry],
+            defaults: None,
+            ..MeshConfig::default()
+        };
+        let error = resolve_plugins(&config, private_host_mode())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("only `enabled` and `args` may be set"),
+            "{error}"
+        );
+    }
+}
+
 #[test]
 fn external_wallet_plugin_replaces_the_builtin_by_capability_not_name() {
     // Another `wallet.v1` implementation is an ordinary external plugin
     // under its own name; the built-in is switched off alongside it.
-    let _build = WalletLexeBuild::present();
+    let _build = BuiltinWalletsBuild::present();
     let config = MeshConfig {
         plugins: vec![
             wallet_entry(Some(false)),

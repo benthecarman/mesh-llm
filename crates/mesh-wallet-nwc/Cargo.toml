@@ -1,0 +1,36 @@
+[package]
+name = "mesh-wallet-nwc"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+description = "Nostr Wallet Connect (NIP-47) wallet plugin for mesh-llm (wallet.v1), served as a built-in `mesh-llm --plugin wallet-nwc` process"
+repository = "https://github.com/Mesh-LLM/mesh-llm"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait = "0.1"
+clap.workspace = true
+futures = "0.3"
+hex = "0.4"
+mesh-llm-plugin = { path = "../mesh-llm-plugin", version = "0.77.0" }
+mesh-llm-wallet = { path = "../mesh-llm-wallet", version = "0.77.0", features = ["plugin-server"] }
+# NIP-47 URI parsing and the NIP-04/NIP-44 ciphers it negotiates.
+nostr = { version = "0.45", default-features = false, features = ["std", "os-rng", "nip47"] }
+nostr-sdk = { version = "0.45.1", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+bitcoin = { version = "0.32", features = ["secp-recovery"] }
+lightning-invoice = { version = "0.35.0-rc1", features = ["std"] }
+# In-process relay for transport tests.
+nostr-sdk = { version = "0.45.1", default-features = false, features = ["local-relay"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }

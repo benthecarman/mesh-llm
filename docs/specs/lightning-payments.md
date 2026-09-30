@@ -125,9 +125,29 @@ name = "wallet-lexe"
 enabled = false
 ```
 
-Only `enabled` may be set on a built-in. A default build without `wallet-lexe`
-accepts this stanza but registers no built-in wallet. A runtime setting cannot
-restore code excluded at build time. NWC and BOLT12 are deferred.
+Only `enabled` may be set on a built-in, plus `args` on `wallet-nwc`. A default
+build without `wallet-lexe` accepts this stanza but registers no built-in
+wallet. A runtime setting cannot restore code excluded at build time. BOLT12 is
+deferred.
+
+`mesh-wallet-nwc` is a second built-in, served as `mesh-llm --plugin
+wallet-nwc` behind the `wallet-nwc` cargo feature. Like `wallet-lexe` it is
+compiled out by default; opt in with `MESH_LLM_WALLET_NWC=1 just build`. It
+connects to a Nostr Wallet Connect (NIP-47) service and only runs once a
+`[[plugin]] name = "wallet-nwc"` stanza configures it. The host passes the
+stanza's `args` to the plugin, which parses them itself:
+
+```toml
+[[plugin]]
+name = "wallet-nwc"
+args = ["--uri-file", "/home/me/.mesh-llm/nwc-uri"]
+```
+
+It pays through NWC-321 `pay` with `max_fee` when the wallet offers it and core
+`pay_invoice` otherwise, and makes amount-less invoices only through NWC-321
+`receive`. A wallet may ignore `max_fee`, so its fees can exceed the authorized
+headroom; they still count against the daily budget. See its README for the
+arguments and the guarantees it cannot give.
 
 When more than one `wallet.v1` plugin runs, the host picks one in this order:
 

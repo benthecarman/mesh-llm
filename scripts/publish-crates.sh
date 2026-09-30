@@ -382,6 +382,7 @@ publish_crates=(
     mesh-llm-wallet
     mesh-wallet-lexe
     mesh-llm-payments-types
+    mesh-wallet-nwc
     mesh-llm-payments
     mesh-llm-identity
     skippy-tokenizer

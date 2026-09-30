@@ -108,6 +108,11 @@ pub const WALLET_LEXE_PLUGIN_ID: &str = "wallet-lexe";
 /// Built-in payments engine, served in-process as the `payments.v1`
 /// capability. Registered only with the `payments` feature.
 pub const PAYMENTS_PLUGIN_ID: &str = "payments";
+/// Built-in Nostr Wallet Connect wallet plugin, served as `mesh-llm --plugin
+/// wallet-nwc`. Compiled in only with the `wallet-nwc` feature, and started
+/// only when a `[[plugin]]` stanza configures it. The only built-in that
+/// reads `args`.
+pub const WALLET_NWC_PLUGIN_ID: &str = "wallet-nwc";
 pub(crate) const PROTOCOL_VERSION: u32 = mesh_llm_plugin::PROTOCOL_VERSION;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 #[cfg(test)]
@@ -1556,6 +1561,10 @@ fn normalize_test_tool_result_content(result: &rmcp::model::CallToolResult) -> R
 /// `[[plugin]]` stanza's `args`, which only a built-in that reads them may
 /// receive.
 pub async fn run_plugin_process(name: String, args: Vec<String>) -> Result<()> {
+    #[cfg(feature = "wallet-nwc")]
+    if name == WALLET_NWC_PLUGIN_ID {
+        return mesh_wallet_nwc::run_plugin(name, args).await;
+    }
     if !args.is_empty() {
         bail!("Built-in plugin '{}' takes no arguments", name);
     }

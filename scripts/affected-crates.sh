@@ -25,6 +25,7 @@ WORKSPACE_MEMBERS=(
   "mesh-llm-payments-types"
   "mesh-llm-wallet"
   "mesh-wallet-lexe"
+  "mesh-wallet-nwc"
   "mesh-llm-protocol"
   "mesh-llm-release-footer"
   "mesh-llm-routing"

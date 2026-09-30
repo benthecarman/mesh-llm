@@ -121,12 +121,17 @@ fi
 stamp_build_version
 
 # `payments` is the ledger + `wallet.v1` plugin adapter and links no wallet SDK.
-# The built-in Lexe wallet (`wallet-lexe`, served as `mesh-llm --plugin
-# wallet-lexe`) is compiled OUT by default; set MESH_LLM_WALLET_LEXE=1 to include it.
+# The built-in wallets (`wallet-lexe` and `wallet-nwc`, served as `mesh-llm
+# --plugin wallet-<name>`) are compiled OUT by default; set
+# MESH_LLM_WALLET_LEXE=1 or MESH_LLM_WALLET_NWC=1 to include them.
 host_features="web-ui,dynamic-native-runtime,payments"
 if [[ "${MESH_LLM_WALLET_LEXE:-0}" == "1" ]]; then
     host_features="$host_features,wallet-lexe"
     echo "Including the built-in Lexe wallet because MESH_LLM_WALLET_LEXE=1."
+fi
+if [[ "${MESH_LLM_WALLET_NWC:-0}" == "1" ]]; then
+    host_features="$host_features,wallet-nwc"
+    echo "Including the built-in Nostr Wallet Connect wallet because MESH_LLM_WALLET_NWC=1."
 fi
 cargo_args=(build --locked -p mesh-llm --bin mesh-llm --no-default-features \
     --features "$host_features")

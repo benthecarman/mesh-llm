@@ -17,13 +17,18 @@ $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDir ".."))
 $llamaDir = if ($env:MESH_LLM_LLAMA_DIR) { [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($repoRoot, $env:MESH_LLM_LLAMA_DIR)) } else { Join-Path $repoRoot ".deps\llama.cpp" }
 $llamaBuildRoot = if ($env:MESH_LLM_LLAMA_BUILD_ROOT) { $env:MESH_LLM_LLAMA_BUILD_ROOT } else { Join-Path $repoRoot ".deps\llama-build" }
 $buildDir = if ($env:LLAMA_STAGE_BUILD_DIR) { $env:LLAMA_STAGE_BUILD_DIR } else { Join-Path $llamaBuildRoot "build-stage-abi" }
-# The built-in Lexe wallet is compiled OUT by default, matching scripts/build-host.sh.
-# Set MESH_LLM_WALLET_LEXE=1 to include `wallet-lexe`.
+# The built-in wallets are compiled OUT by default, matching scripts/build-host.sh.
+# Set MESH_LLM_WALLET_LEXE=1 to include `wallet-lexe` and MESH_LLM_WALLET_NWC=1
+# to include `wallet-nwc`.
 function Get-HostFeatureList {
     $features = "web-ui,dynamic-native-runtime,payments"
     if ($env:MESH_LLM_WALLET_LEXE -eq "1") {
         $features = "$features,wallet-lexe"
         Write-Host "Including the built-in Lexe wallet because MESH_LLM_WALLET_LEXE=1."
+    }
+    if ($env:MESH_LLM_WALLET_NWC -eq "1") {
+        $features = "$features,wallet-nwc"
+        Write-Host "Including the built-in Nostr Wallet Connect wallet because MESH_LLM_WALLET_NWC=1."
     }
     return $features
 }
