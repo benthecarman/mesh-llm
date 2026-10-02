@@ -101,6 +101,20 @@ impl StageSession {
         })
     }
 
+    /// Total KV cells in this session's llama context (`n_ctx`).
+    ///
+    /// Every session shares its model's single context, so this is the whole
+    /// pool across all lanes, not this session's share. `None` when the
+    /// runtime does not export the accessor.
+    pub fn context_size(&self) -> Option<u32> {
+        let ctx = unsafe { skippy_ffi::skippy_session_llama_context(self.raw) };
+        if ctx.is_null() {
+            return None;
+        }
+        // Optional symbol: an older runtime simply reports no size.
+        unsafe { skippy_ffi::llama_n_ctx(ctx) }.filter(|cells| *cells > 0)
+    }
+
     pub fn token_count(&self) -> u64 {
         self.token_count
     }

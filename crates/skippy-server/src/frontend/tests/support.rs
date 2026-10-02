@@ -119,6 +119,33 @@ pub(super) fn unsupported_code(error: OpenAiError) -> Option<String> {
 }
 
 /// Create a real local OpenAI backend for the supplied native model and configuration.
+/// Load the native runtime bundle named by `bundle_env` for an opt-in
+/// real-model test. Statically linked builds need nothing loaded.
+pub(super) fn load_test_native_runtime(bundle_env: &str) -> Result<()> {
+    #[cfg(feature = "dynamic-native-runtime")]
+    {
+        let directory = PathBuf::from(std::env::var(bundle_env)?);
+        let manifest: Value = serde_json::from_slice(&fs::read(directory.join("manifest.json"))?)?;
+        let libraries = manifest["runtime"]["libraries"]
+            .as_array()
+            .context("runtime library list")?
+            .iter()
+            .map(|path| {
+                path.as_str()
+                    .map(|p| directory.join(p))
+                    .context("runtime library path")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // SAFETY: opt-in tests require a bundle built from this checkout.
+        unsafe {
+            skippy_runtime::load_native_runtime_libraries(libraries)?;
+        }
+    }
+    #[cfg(not(feature = "dynamic-native-runtime"))]
+    let _ = bundle_env;
+    Ok(())
+}
+
 pub(super) fn local_openai_backend(
     config: StageConfig,
     model_id: impl Into<String>,

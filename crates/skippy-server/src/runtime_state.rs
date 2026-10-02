@@ -41,7 +41,7 @@ pub struct RuntimeState {
     /// Size of the context's KV cell pool, in tokens (llama.cpp `n_ctx`). In
     /// unified-KV mode every lane draws decode/prefill cells from this single
     /// shared pool, so it is the real ceiling for scheduler admission — see
-    /// [`Self::kv_pool_tokens`] and [`native_kv_pool_tokens`].
+    /// [`Self::kv_pool_tokens`] and [`loaded_kv_pool_tokens`].
     kv_pool_tokens: u32,
     /// High-water mark of lane indices ever handed out. Combined with
     /// [`Self::free_lane_indices`], the count of live lanes equals
@@ -292,8 +292,8 @@ impl RuntimeState {
     }
 
     /// Total KV cell pool available to this context, in tokens (`n_ctx`),
-    /// across all lanes. This is `ctx_size * lane_count`, not the per-lane
-    /// `ctx_size`; see [`native_kv_pool_tokens`].
+    /// across all lanes, not the per-lane `ctx_size`. Measured from the
+    /// native context at load; see [`loaded_kv_pool_tokens`].
     ///
     /// In unified-KV mode all lanes share this single pool, so it is the real
     /// token budget the iteration scheduler must admit against. Returns 0 for
@@ -394,12 +394,13 @@ fn runtime_from_loaded_model(
 ) -> Result<Arc<Mutex<RuntimeState>>> {
     reject_unsupported_staged_workload(config, &model)?;
     let lane_count = effective_lane_count(config.lane_count, &model)?;
+    let kv_pool_tokens = loaded_kv_pool_tokens(config, &model);
     Ok(Arc::new(Mutex::new(RuntimeState {
         model,
         layer_start: config.layer_start,
         layer_end: config.layer_end,
         lane_count,
-        kv_pool_tokens: native_kv_pool_tokens(config.ctx_size, config.lane_count),
+        kv_pool_tokens,
         next_lane_index: 0,
         free_lane_indices: Vec::new(),
         sessions: BTreeMap::new(),
@@ -451,9 +452,40 @@ pub fn load_runtime_with_overrides_and_open_events(
     )?))
 }
 
-/// Total KV cells the native context allocates (llama.cpp `n_ctx`).
+/// Total KV cells in the loaded model's context (llama.cpp `n_ctx`).
 ///
-/// Mirrors `skippy_context_capacity` in the native patch queue: `ctx_size` is
+/// The native context is the source of truth, so ask it. A runtime that
+/// cannot report its size (no native model, no `llama_n_ctx` export, or a
+/// failed probe) falls back to [`native_kv_pool_tokens`].
+fn loaded_kv_pool_tokens(config: &StageConfig, model: &StageModel) -> u32 {
+    let derived = native_kv_pool_tokens(config.ctx_size, config.lane_count);
+    if !model.has_native_model() {
+        return derived;
+    }
+    match measure_native_kv_pool_tokens(model) {
+        Ok(measured) => measured.unwrap_or(derived),
+        Err(error) => {
+            tracing::warn!(
+                stage_id = %config.stage_id,
+                derived_kv_pool_tokens = derived,
+                "could not read the native KV pool size; using ctx_size * lane_count: {error:#}"
+            );
+            derived
+        }
+    }
+}
+
+/// Read `n_ctx` through a short-lived probe session. Every session shares the
+/// model's one context, and dropping the probe frees its native lane before
+/// any lane is handed out.
+fn measure_native_kv_pool_tokens(model: &StageModel) -> Result<Option<u32>> {
+    Ok(model.create_session()?.context_size())
+}
+
+/// Total KV cells the native context allocates, derived from configuration.
+///
+/// Fallback for [`loaded_kv_pool_tokens`]. Mirrors `skippy_context_capacity`
+/// in the native patch queue: `ctx_size` is
 /// the per-lane request limit, and the context is opened with
 /// `n_ctx = ctx_size * lane_count` and `n_seq_max = lane_count`. The pool is
 /// sized from the configured lane count, before any encoder-decoder lane

@@ -100,6 +100,26 @@ pub unsafe fn llama_model_is_recurrent(model: *const Opaque) -> Option<bool> {
     }
 }
 
+/// Reports a llama context's total KV cell pool (`n_ctx`) across every
+/// sequence, when the native runtime exports the upstream accessor.
+///
+/// `None` is the result for an older compatible runtime that does not export
+/// this optional upstream symbol.
+///
+/// # Safety
+///
+/// `ctx` must be a valid llama.cpp context pointer owned by the loaded runtime.
+pub unsafe fn llama_n_ctx(ctx: *const Opaque) -> Option<u32> {
+    #[cfg(feature = "dynamic-runtime")]
+    {
+        dynamic::llama_n_ctx_fn().map(|n_ctx| unsafe { n_ctx(ctx) })
+    }
+    #[cfg(not(feature = "dynamic-runtime"))]
+    {
+        Some(unsafe { static_bindings::llama_n_ctx(ctx) })
+    }
+}
+
 /// Reports whether the loaded model uses hybrid state when the native runtime
 /// exposes the corresponding llama.cpp capability probe.
 ///

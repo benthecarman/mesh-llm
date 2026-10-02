@@ -118,6 +118,37 @@ fn resident_capacity_admits_against_every_lane_of_the_kv_pool() {
 }
 
 #[test]
+#[ignore = "requires MESH_KV_POOL_TEST_MODEL and MESH_KV_POOL_TEST_RUNTIME; \
+            MESH_KV_POOL_TEST_LAYER_END defaults to 28"]
+fn resident_capacity_uses_the_native_context_size() -> Result<()> {
+    support::load_test_native_runtime("MESH_KV_POOL_TEST_RUNTIME")?;
+    // 3 lanes of 4,100 cells derive to 12,300. llama.cpp pads n_ctx to a
+    // multiple of 256, so the real pool is 12,544; only a measured size can
+    // report that.
+    let config = StageConfig {
+        model_id: "kv-pool-smoke".into(),
+        model_path: Some(std::env::var("MESH_KV_POOL_TEST_MODEL")?),
+        layer_end: std::env::var("MESH_KV_POOL_TEST_LAYER_END")
+            .map_or(Ok(28), |layers| layers.parse())?,
+        ctx_size: 4100,
+        lane_count: 3,
+        n_gpu_layers: 0,
+        load_mode: LoadMode::RuntimeSlice,
+        ..StageConfig::default()
+    };
+    let runtime = load_runtime(&config)?.context("runtime loaded")?;
+    let mut runtime = runtime
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    assert_eq!(runtime.kv_pool_tokens(), 12_544);
+    // The load-time probe session returned its native lane: every configured
+    // lane can still be claimed.
+    assert_eq!(runtime.prewarm_idle_sessions(3)?.idle_sessions, 3);
+    Ok(())
+}
+
+#[test]
 fn resident_capacity_unknown_fails_closed() {
     let config = prefix_cache_test_config();
     let kv = KvStageIntegration::from_config(&config, skippy_runtime::ModelStateKind::Dense)

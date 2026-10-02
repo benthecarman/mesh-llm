@@ -355,6 +355,7 @@ type SkippyParseChatResponseJsonFn = unsafe extern "C" fn(
     out_error: *mut *mut Error,
 ) -> Status;
 pub(crate) type LlamaModelStateFn = unsafe extern "C" fn(model: *const Opaque) -> bool;
+pub(crate) type LlamaContextSizeFn = unsafe extern "C" fn(ctx: *const Opaque) -> u32;
 
 impl Symbols {
     fn lookup_optional<Sym>(&self, name: &[u8]) -> Option<Sym>
@@ -427,6 +428,11 @@ pub fn skippy_abi_features_optional() -> Option<SkippyAbiFeaturesFn> {
 pub fn llama_perf_context_optional() -> Option<LlamaPerfContextFn> {
     static CACHE: OnceLock<Option<LlamaPerfContextFn>> = OnceLock::new();
     *CACHE.get_or_init(|| symbols().lookup_optional::<LlamaPerfContextFn>(b"llama_perf_context\0"))
+}
+
+pub(crate) fn llama_n_ctx_fn() -> Option<LlamaContextSizeFn> {
+    static CACHE: OnceLock<Option<LlamaContextSizeFn>> = OnceLock::new();
+    *CACHE.get_or_init(|| symbols().lookup_optional::<LlamaContextSizeFn>(b"llama_n_ctx\0"))
 }
 
 pub(crate) fn llama_model_is_recurrent_fn() -> Option<LlamaModelStateFn> {

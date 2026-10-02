@@ -37,25 +37,7 @@ impl GenerationGate for TestGate {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires MESH_PAYMENT_TEST_MODEL and a CPU native runtime bundle"]
 async fn payments_real_model_prefills_before_gate_and_streams_usage_after_release() -> Result<()> {
-    #[cfg(feature = "dynamic-native-runtime")]
-    {
-        let directory = PathBuf::from(std::env::var("MESH_PAYMENT_TEST_RUNTIME")?);
-        let manifest: Value = serde_json::from_slice(&fs::read(directory.join("manifest.json"))?)?;
-        let libraries = manifest["runtime"]["libraries"]
-            .as_array()
-            .context("runtime library list")?
-            .iter()
-            .map(|path| {
-                path.as_str()
-                    .map(|p| directory.join(p))
-                    .context("runtime library path")
-            })
-            .collect::<Result<Vec<_>>>()?;
-        // SAFETY: this opt-in test requires a bundle built from this checkout.
-        unsafe {
-            skippy_runtime::load_native_runtime_libraries(libraries)?;
-        }
-    }
+    support::load_test_native_runtime("MESH_PAYMENT_TEST_RUNTIME")?;
     let path = std::env::var("MESH_PAYMENT_TEST_MODEL")?;
     let config = StageConfig {
         model_id: "payment-smoke".into(),

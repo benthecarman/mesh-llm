@@ -231,6 +231,7 @@ unsafe extern "C" {
     ) -> Status;
 
     pub fn skippy_session_llama_context(session: *mut Session) -> *mut Opaque;
+    pub fn llama_n_ctx(ctx: *const Opaque) -> u32;
     pub fn llama_perf_context(ctx: *mut Opaque) -> LlamaPerfContextData;
 
     pub fn skippy_session_position(session: *const Session) -> i32;
