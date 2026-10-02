@@ -41,8 +41,8 @@ pub struct RuntimeState {
     /// Size of the context's KV cell pool, in tokens (llama.cpp `n_ctx`). In
     /// unified-KV mode every lane draws decode/prefill cells from this single
     /// shared pool, so it is the real ceiling for scheduler admission — see
-    /// [`Self::kv_pool_tokens`].
-    ctx_size: u32,
+    /// [`Self::kv_pool_tokens`] and [`native_kv_pool_tokens`].
+    kv_pool_tokens: u32,
     /// High-water mark of lane indices ever handed out. Combined with
     /// [`Self::free_lane_indices`], the count of live lanes equals
     /// `next_lane_index - free_lane_indices.len()`.
@@ -213,14 +213,29 @@ impl RuntimeState {
         Self::new_modelless_with_capacity_for_test(lane_count, 0)
     }
 
+    /// A modelless runtime whose KV pool is sized from `config` the way the
+    /// native context sizes it.
     #[cfg(test)]
-    pub(crate) fn new_modelless_with_capacity_for_test(lane_count: u32, ctx_size: u32) -> Self {
+    pub(crate) fn new_modelless_for_stage_config_for_test(config: &StageConfig) -> Self {
+        Self::new_modelless_with_capacity_for_test(
+            config.lane_count,
+            native_kv_pool_tokens(config.ctx_size, config.lane_count),
+        )
+    }
+
+    /// A modelless runtime whose KV pool holds `kv_pool_tokens` cells in total
+    /// (not per lane).
+    #[cfg(test)]
+    pub(crate) fn new_modelless_with_capacity_for_test(
+        lane_count: u32,
+        kv_pool_tokens: u32,
+    ) -> Self {
         Self {
             model: StageModel::new_dummy(),
             layer_start: 0,
             layer_end: 1,
             lane_count,
-            ctx_size,
+            kv_pool_tokens,
             next_lane_index: 0,
             free_lane_indices: Vec::new(),
             sessions: BTreeMap::new(),
@@ -276,14 +291,16 @@ impl RuntimeState {
         self.sessions.len()
     }
 
-    /// Total KV cell pool available to this context, in tokens (`n_ctx`).
+    /// Total KV cell pool available to this context, in tokens (`n_ctx`),
+    /// across all lanes. This is `ctx_size * lane_count`, not the per-lane
+    /// `ctx_size`; see [`native_kv_pool_tokens`].
     ///
     /// In unified-KV mode all lanes share this single pool, so it is the real
     /// token budget the iteration scheduler must admit against. Returns 0 for
     /// the modelless test runtime, in which case callers should fall back to a
     /// configured default.
     pub fn kv_pool_tokens(&self) -> u32 {
-        self.ctx_size
+        self.kv_pool_tokens
     }
 
     #[cfg(test)]
@@ -382,7 +399,7 @@ fn runtime_from_loaded_model(
         layer_start: config.layer_start,
         layer_end: config.layer_end,
         lane_count,
-        ctx_size: config.ctx_size,
+        kv_pool_tokens: native_kv_pool_tokens(config.ctx_size, config.lane_count),
         next_lane_index: 0,
         free_lane_indices: Vec::new(),
         sessions: BTreeMap::new(),
@@ -432,6 +449,25 @@ pub fn load_runtime_with_overrides_and_open_events(
         model,
         session_lifecycle_observer,
     )?))
+}
+
+/// Total KV cells the native context allocates (llama.cpp `n_ctx`).
+///
+/// Mirrors `skippy_context_capacity` in the native patch queue: `ctx_size` is
+/// the per-lane request limit, and the context is opened with
+/// `n_ctx = ctx_size * lane_count` and `n_seq_max = lane_count`. The pool is
+/// sized from the configured lane count, before any encoder-decoder lane
+/// clamp, because native sizes it before that clamp too.
+///
+/// With unified KV every lane draws from this one pool. Without it, llama.cpp
+/// gives each of the `lane_count` streams `ctx_size` cells; the total is the
+/// same, and the per-lane bound is enforced by the per-request `ctx_size`
+/// limit. llama.cpp only rounds `n_ctx` up (to a multiple of 256, per stream
+/// when KV is not unified), so this is exact for aligned sizes and otherwise
+/// a safe lower bound. A zero `ctx_size` reports an unknown (zero) pool so
+/// callers keep their conservative fallback.
+fn native_kv_pool_tokens(ctx_size: u32, configured_lane_count: u32) -> u32 {
+    ctx_size.saturating_mul(configured_lane_count.max(1))
 }
 
 /// Effective lane-admission bound for a loaded model.
@@ -648,7 +684,7 @@ mod tests {
 
     use super::{
         RuntimeLaunchOverrides, RuntimeState, effective_lane_count, lane_count_for_workload,
-        load_runtime_with_overrides, max_idle_sessions_from_stage_config,
+        load_runtime_with_overrides, max_idle_sessions_from_stage_config, native_kv_pool_tokens,
         reject_legacy_serving_package, runtime_config_from_stage_config, runtime_from_loaded_model,
     };
 
@@ -704,6 +740,37 @@ mod tests {
         let rt = RuntimeState::new_modelless_for_test(4);
         assert_eq!(rt.kv_pool_tokens(), 0);
         assert_eq!(rt.lane_count(), 4);
+    }
+
+    #[test]
+    fn kv_pool_spans_every_configured_lane() {
+        // Native opens the context with n_ctx = ctx_size * lane_count, so a
+        // 16-lane 4k runtime holds 65,536 cells, not 4,096.
+        let config = StageConfig {
+            stage_id: "stage-0".to_string(),
+            ctx_size: 4096,
+            lane_count: 16,
+            ..StageConfig::default()
+        };
+        let runtime = runtime_from_loaded_model(&config, StageModel::new_dummy(), None)
+            .expect("dummy construction succeeds");
+        let rt = runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(rt.kv_pool_tokens(), 65_536);
+        assert_eq!(rt.lane_count(), 16);
+    }
+
+    #[test]
+    fn native_kv_pool_matches_native_context_capacity() {
+        assert_eq!(native_kv_pool_tokens(4096, 16), 65_536);
+        assert_eq!(native_kv_pool_tokens(4096, 1), 4096);
+        // Native treats a zero lane count as one lane.
+        assert_eq!(native_kv_pool_tokens(4096, 0), 4096);
+        // An unset context size stays unknown so callers use their fallback.
+        assert_eq!(native_kv_pool_tokens(0, 16), 0);
+        // Native rejects an overflowing product; never wrap to a small pool.
+        assert_eq!(native_kv_pool_tokens(u32::MAX, 2), u32::MAX);
     }
 
     #[test]

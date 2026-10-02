@@ -150,6 +150,7 @@ pub async fn serve_openai(args: ServeOpenAiArgs) -> Result<()> {
     )?
     .map(Arc::new);
     let ctx_size = usize::try_from(config.ctx_size).unwrap_or(usize::MAX);
+    let generation_token_budget = runtime_generation_token_budget(&runtime, ctx_size);
     let iteration_scheduler = IterationScheduler::new(
         runtime.clone(),
         &config,
@@ -188,7 +189,7 @@ pub async fn serve_openai(args: ServeOpenAiArgs) -> Result<()> {
             generation_concurrency,
         )),
         generation_session_locks: Arc::new(Mutex::new(BTreeMap::new())),
-        generation_token_budget: Arc::new(GenerationTokenBudget::new(ctx_size)),
+        generation_token_budget,
         hook_policy: None,
         generation_receipt: None,
         generation_lifecycle: None,
@@ -530,6 +531,7 @@ fn embedded_openai_backend_with_scheduler(
     )?
     .map(Arc::new);
     let ctx_size = usize::try_from(args.config.ctx_size).unwrap_or(usize::MAX);
+    let generation_token_budget = runtime_generation_token_budget(&args.runtime, ctx_size);
     let iteration_scheduler = match iteration_scheduler {
         Some(iteration_scheduler) => iteration_scheduler,
         None => IterationScheduler::new(
@@ -570,7 +572,7 @@ fn embedded_openai_backend_with_scheduler(
             args.generation_concurrency,
         )),
         generation_session_locks: Arc::new(Mutex::new(BTreeMap::new())),
-        generation_token_budget: Arc::new(GenerationTokenBudget::new(ctx_size)),
+        generation_token_budget,
         hook_policy: args.hook_policy,
         generation_receipt: args.generation_receipt,
         generation_lifecycle: args.generation_lifecycle,
@@ -597,6 +599,27 @@ fn embedded_openai_backend_with_scheduler(
         generation_admission_timeout_secs: args.generation_admission_timeout_secs,
         openai_guardrails,
     })
+}
+
+/// Size the generation token budget from the runtime's whole KV pool.
+///
+/// `ctx_size` is the per-lane request limit, enforced per request before
+/// admission. The budget bounds the sum of all in-flight reservations, so it
+/// must span every lane's share of the pool. A runtime that does not know its
+/// pool falls back to one lane's context.
+fn runtime_generation_token_budget(
+    runtime: &Mutex<RuntimeState>,
+    ctx_size: usize,
+) -> Arc<GenerationTokenBudget> {
+    let kv_pool_tokens = runtime
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .kv_pool_tokens();
+    let capacity_tokens = match kv_pool_tokens {
+        0 => ctx_size,
+        tokens => usize::try_from(tokens).unwrap_or(usize::MAX),
+    };
+    Arc::new(GenerationTokenBudget::new(capacity_tokens))
 }
 
 fn validate_generation_receipt_topology(
@@ -707,13 +730,34 @@ pub(in crate::frontend) async fn openai_http_telemetry(
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_adaptive_generation_min_concurrency, validate_generation_receipt_topology,
+        resolve_adaptive_generation_min_concurrency, runtime_generation_token_budget,
+        validate_generation_receipt_topology,
     };
     use crate::frontend::CompositeGenerationLifecycleIngress;
     use crate::frontend::GenerationLifecycleConfig;
     use crate::frontend::GenerationReceiptConfig;
+    use crate::runtime_state::RuntimeState;
     use crate::serving_hooks::ModelServingHooks;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn generation_token_budget_spans_the_whole_kv_pool() {
+        // 16 lanes of 4k context share a 65,536-cell pool. Eight ~1k-token
+        // requests must all reserve at once instead of queueing behind 4k.
+        let runtime = Mutex::new(RuntimeState::new_modelless_with_capacity_for_test(
+            16, 65_536,
+        ));
+        assert_eq!(
+            runtime_generation_token_budget(&runtime, 4096).capacity_tokens(),
+            65_536
+        );
+
+        let unknown_pool = Mutex::new(RuntimeState::new_modelless_for_test(16));
+        assert_eq!(
+            runtime_generation_token_budget(&unknown_pool, 4096).capacity_tokens(),
+            4096
+        );
+    }
 
     #[test]
     fn generation_receipts_require_local_single_stage_topology() {

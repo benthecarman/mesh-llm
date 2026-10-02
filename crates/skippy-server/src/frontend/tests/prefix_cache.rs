@@ -73,6 +73,51 @@ fn resident_capacity_rejection_is_side_effect_free_and_retryable() {
 }
 
 #[test]
+fn resident_capacity_admits_against_every_lane_of_the_kv_pool() {
+    // 16 lanes of 4k context: native allocates one 65,536-cell pool. Eight
+    // concurrent ~830-token requests exceed one lane's 4k but fit the pool.
+    let config = StageConfig {
+        ctx_size: 4096,
+        lane_count: 16,
+        ..prefix_cache_test_config()
+    };
+    let kv = KvStageIntegration::from_config(&config, skippy_runtime::ModelStateKind::Dense)
+        .unwrap()
+        .expect("resident prefix cache enabled");
+    let mut runtime =
+        crate::runtime_state::RuntimeState::new_modelless_for_stage_config_for_test(&config);
+    let mut reservations = (0..8)
+        .map(|index| {
+            kv.reserve_resident_capacity(&format!("stream-{index}"), 834)
+                .unwrap()
+                .expect("resident reservation")
+        })
+        .collect::<Vec<_>>();
+
+    let fits = kv
+        .admit_resident_capacity(&mut runtime, "stream-0", 834, 512, 512, None)
+        .unwrap();
+    assert!(fits.admitted);
+    assert_eq!(fits.capacity_tokens, 65_536);
+    assert_eq!(fits.request_tokens, 6_672);
+    assert_eq!(fits.admission_deficit_tokens, 0);
+
+    // Demand that would leave less than the decode watermark free is still
+    // rejected.
+    reservations.push(
+        kv.reserve_resident_capacity("burst", 58_500)
+            .unwrap()
+            .expect("resident reservation"),
+    );
+    let overflow = kv
+        .admit_resident_capacity(&mut runtime, "burst", 58_500, 512, 512, None)
+        .unwrap();
+    assert!(!overflow.admitted);
+    assert_eq!(overflow.request_tokens, 65_172);
+    assert_eq!(overflow.admission_deficit_tokens, 148);
+}
+
+#[test]
 fn resident_capacity_unknown_fails_closed() {
     let config = prefix_cache_test_config();
     let kv = KvStageIntegration::from_config(&config, skippy_runtime::ModelStateKind::Dense)
