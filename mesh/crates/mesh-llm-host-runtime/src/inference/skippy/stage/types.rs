@@ -6,6 +6,8 @@ use tokio::sync::oneshot;
 pub(crate) enum StageControlCommand {
     Execute {
         request: StageControlRequest,
+        /// `LocalOnly` for a peer's request when peer model downloads are off.
+        source_fetch: crate::inference::skippy::StageSourceFetch,
         resp: oneshot::Sender<Result<StageControlResponse>>,
     },
     ValidateLoad {

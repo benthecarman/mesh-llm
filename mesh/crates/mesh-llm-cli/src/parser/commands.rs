@@ -873,6 +873,12 @@ pub struct Cli {
     #[arg(long, value_name = "SIZE")]
     pub kv_cache_min_free: Option<String>,
 
+    /// Refuse peer split-stage requests that need model files not already on
+    /// this node. Local and configured models still load and serve. Same as
+    /// `runtime.peer_model_downloads = false`.
+    #[arg(long)]
+    pub no_peer_model_downloads: bool,
+
     /// Path to the owner keystore used to attest this node.
     #[arg(long)]
     pub owner_key: Option<PathBuf>,

@@ -329,6 +329,13 @@ fn process_setting_presentation(rendered: &str) -> Option<SettingPresentation> {
         )
         .unit("sec")
         .hint("number")),
+        "runtime.peer_model_downloads" => Some(sp(
+            "Peer model downloads",
+            "Let a peer's split-stage request make this node download model files it does not already have. Off, peers may only use model files already on local disk; local loads and configured models are unaffected. This matches --no-peer-model-downloads.",
+            RUNTIME_POLICY_CATEGORY,
+            50,
+        )
+        .hint("toggle")),
         "runtime.debug" => Some(
             sp(
                 "Debug output",

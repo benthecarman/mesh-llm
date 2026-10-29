@@ -24,6 +24,7 @@ mod runtime_events;
 mod tests;
 mod types;
 
+use super::StageSourceFetch;
 use inventory::resolve_inventory_source;
 pub(crate) use types::*;
 
@@ -81,11 +82,15 @@ fn spawn_stage_control_loop_with_state(mut state: StageControlState) -> StageCon
                 command = rx.recv() => {
                     let Some(command) = command else { break };
                     match command {
-                        StageControlCommand::Execute { request, resp } => {
+                        StageControlCommand::Execute {
+                            request,
+                            source_fetch,
+                            resp,
+                        } => {
                             tokio::select! {
                                 biased;
                                 _ = &mut shutdown_rx => break,
-                                result = state.handle(request) => {
+                                result = state.handle(request, source_fetch) => {
                                     let _ = resp.send(result);
                                 }
                             }
@@ -125,18 +130,25 @@ impl StageControlState {
         Ok(())
     }
 
-    async fn handle(&mut self, request: StageControlRequest) -> Result<StageControlResponse> {
+    async fn handle(
+        &mut self,
+        request: StageControlRequest,
+        source_fetch: StageSourceFetch,
+    ) -> Result<StageControlResponse> {
         match request {
             StageControlRequest::Claim(claim) => self
                 .claim(claim)
                 .await
                 .map(StageControlResponse::ClaimAccepted),
-            StageControlRequest::Load(load) => {
-                self.load(load).await.map(StageControlResponse::Ready)
-            }
+            StageControlRequest::Load(load) => self
+                .load(load, source_fetch)
+                .await
+                .map(StageControlResponse::Ready),
             StageControlRequest::LoadLocal(mut load) => {
                 load.local_source_required = true;
-                self.load(load).await.map(StageControlResponse::Ready)
+                self.load(load, source_fetch)
+                    .await
+                    .map(StageControlResponse::Ready)
             }
             StageControlRequest::Stop(stop) => {
                 self.stop(stop).await.map(StageControlResponse::Ready)
@@ -145,7 +157,7 @@ impl StageControlState {
                 Ok(StageControlResponse::Status(self.statuses(&filter)))
             }
             StageControlRequest::Inventory(request) => Ok(StageControlResponse::Inventory(
-                self.inventory(request).await,
+                self.inventory(request, source_fetch).await,
             )),
         }
     }
@@ -180,23 +192,28 @@ impl StageControlState {
         }
     }
 
-    async fn inventory(&self, request: StageInventoryRequest) -> StageLayerInventory {
+    async fn inventory(
+        &self,
+        request: StageInventoryRequest,
+        source_fetch: StageSourceFetch,
+    ) -> StageLayerInventory {
         let source_request = request.clone();
-        let source =
-            match tokio::task::spawn_blocking(move || resolve_inventory_source(&source_request))
-                .await
-            {
-                Ok(source) => source,
-                Err(error) => {
-                    tracing::warn!(
-                        model_id = request.model_id,
-                        package_ref = request.package_ref,
-                        error = %error,
-                        "GGUF inventory verification task failed"
-                    );
-                    None
-                }
-            };
+        let source = match tokio::task::spawn_blocking(move || {
+            resolve_inventory_source(&source_request, source_fetch)
+        })
+        .await
+        {
+            Ok(source) => source,
+            Err(error) => {
+                tracing::warn!(
+                    model_id = request.model_id,
+                    package_ref = request.package_ref,
+                    error = %error,
+                    "GGUF inventory verification task failed"
+                );
+                None
+            }
+        };
         let layer_count = source
             .as_ref()
             .map(|source| source.layer_count)
@@ -267,7 +284,11 @@ impl StageControlState {
         }
     }
 
-    async fn load(&mut self, mut load: StageLoadRequest) -> Result<StageReadyResponse> {
+    async fn load(
+        &mut self,
+        mut load: StageLoadRequest,
+        source_fetch: StageSourceFetch,
+    ) -> Result<StageReadyResponse> {
         if let Err(error) =
             crate::system::native_runtime_requirement::ensure_native_runtime_available()
         {
@@ -313,7 +334,7 @@ impl StageControlState {
         let package_request = effective_load.clone();
         let mut resolved_package = None;
         if let Some(package) = tokio::task::spawn_blocking(move || {
-            super::materialization::resolve_stage_load_package(&package_request)
+            super::materialization::resolve_stage_load_package(&package_request, source_fetch)
         })
         .await
         .context("join resolve stage load package task")??

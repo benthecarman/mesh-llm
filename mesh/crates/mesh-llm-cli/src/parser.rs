@@ -213,6 +213,21 @@ mod tests {
     }
 
     #[test]
+    fn serve_takes_no_peer_model_downloads_flag() {
+        let parse = |args: &[&str]| {
+            let normalized = super::normalize_runtime_surface_args(
+                args.iter()
+                    .map(std::ffi::OsString::from)
+                    .collect::<Vec<_>>(),
+            );
+            Cli::try_parse_from(normalized.normalized).expect("serve flags should parse")
+        };
+
+        assert!(!parse(&["mesh-llm", "serve"]).no_peer_model_downloads);
+        assert!(parse(&["mesh-llm", "serve", "--no-peer-model-downloads"]).no_peer_model_downloads);
+    }
+
+    #[test]
     fn serve_and_client_still_take_the_hidden_no_default_plugins_flag() {
         for surface in ["serve", "client"] {
             let normalized = super::normalize_runtime_surface_args(

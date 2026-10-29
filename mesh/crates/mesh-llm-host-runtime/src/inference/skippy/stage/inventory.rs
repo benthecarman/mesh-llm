@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::inference::skippy::materialization::is_layer_package_ref;
 
-use super::{SourceModelKind, StageInventoryRequest};
+use super::{SourceModelKind, StageInventoryRequest, StageSourceFetch};
 
 #[derive(Clone, Debug)]
 pub(super) struct InventorySource {
@@ -13,7 +13,10 @@ pub(super) struct InventorySource {
     pub(super) sha256: Option<String>,
 }
 
-pub(super) fn resolve_inventory_source(request: &StageInventoryRequest) -> Option<InventorySource> {
+pub(super) fn resolve_inventory_source(
+    request: &StageInventoryRequest,
+    source_fetch: StageSourceFetch,
+) -> Option<InventorySource> {
     let local_source_required = crate::inference::skippy::effective_local_source_required(
         &request.model_id,
         request.runtime_profile.as_deref(),
@@ -55,6 +58,12 @@ pub(super) fn resolve_inventory_source(request: &StageInventoryRequest) -> Optio
         });
     }
     if is_layer_package_ref(&request.package_ref) {
+        // Inspecting an uncached package downloads its metadata.
+        if !source_fetch.allows_fetch()
+            && !crate::inference::skippy::package_metadata_is_local(&request.package_ref)
+        {
+            return None;
+        }
         let identity = crate::inference::skippy::identity_from_layer_package(&request.package_ref)
             .map_err(|error| {
                 tracing::debug!(

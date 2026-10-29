@@ -4,9 +4,23 @@ pub use mesh_llm_skippy_adapter::package::acquisition::{StagePackageRef, is_laye
 use skippy_package_format::stage_admission::StageAdmissionDescriptor as PackageV2StageAdmissionDescriptor;
 use std::path::PathBuf;
 
+use crate::inference::skippy::StageSourceFetch;
+
 fn acquisition() -> skippy_api::package::acquisition::remote::PackageAcquisition {
-    mesh_llm_skippy_adapter::package::acquisition::with_client(|| {
-        crate::models::build_hf_api(false)
+    acquisition_for(StageSourceFetch::Allowed)
+}
+
+/// Skippy builds the Hugging Face client only on a cache miss, so a factory
+/// that refuses keeps a `LocalOnly` resolution to cached files.
+fn acquisition_for(
+    fetch: StageSourceFetch,
+) -> skippy_api::package::acquisition::remote::PackageAcquisition {
+    mesh_llm_skippy_adapter::package::acquisition::with_client(move || {
+        if fetch.allows_fetch() {
+            crate::models::build_hf_api(false)
+        } else {
+            Err(StageSourceFetch::refusal("layer package"))
+        }
     })
 }
 
@@ -25,11 +39,20 @@ pub fn resolve_hf_package_to_local(
         include_output,
     )
 }
-pub fn resolve_package_v2_stage_to_local(
+
+/// Whether a package's manifest and shared metadata are already cached.
+pub(crate) fn package_metadata_is_local(package_ref: &str) -> bool {
+    acquisition_for(StageSourceFetch::LocalOnly)
+        .resolve_hf_package_to_local(package_ref, 0, 0, false, false)
+        .is_ok()
+}
+
+pub(crate) fn resolve_package_v2_stage_to_local(
     package_ref: &str,
     admission: &PackageV2StageAdmissionDescriptor,
+    fetch: StageSourceFetch,
 ) -> Result<(String, Vec<PathBuf>, Option<PathBuf>)> {
-    acquisition().resolve_package_v2_stage_to_local(package_ref, admission)
+    acquisition_for(fetch).resolve_package_v2_stage_to_local(package_ref, admission)
 }
 pub fn resolve_package_v2_full_model_to_local(
     package_ref: &str,

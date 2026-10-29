@@ -4,6 +4,7 @@ use mesh_llm_types::mesh::{DEMAND_TTL_SECS, merge_demand};
 use serde_json::json;
 use std::net::SocketAddr;
 
+mod local_request_metrics;
 mod membership;
 mod routing_telemetry;
 mod startup;
@@ -13,6 +14,8 @@ pub(crate) use membership::{
     membership_token_endpoint,
 };
 
+pub(crate) use local_request_metrics::LocalRequestMetricsSampler;
+pub use local_request_metrics::LocalRequestMetricsSnapshot;
 pub use startup::detect_local_fit_bytes;
 #[cfg(test)]
 pub(crate) use startup::hardware_snapshot_for_start;
@@ -211,6 +214,8 @@ pub struct Node {
     pub(crate) drain_timeout_secs: u64,
     /// Upper bound for private owner-requested graceful drain timeouts.
     pub(crate) drain_timeout_max_secs: u64,
+    /// Whether a peer's stage request may fetch model files this node lacks.
+    pub(crate) peer_stage_source_fetch: crate::inference::skippy::StageSourceFetch,
     pub(crate) runtime_intents: Arc<std::sync::Mutex<Vec<crate::runtime::DesiredRuntimeIntent>>>,
     pub(crate) runtime_instance_lifecycles: Arc<
         std::sync::Mutex<
@@ -229,23 +234,6 @@ pub struct Node {
     pub(crate) local_endpoints: LocalEndpoints,
     /// A membership node: it keeps to the one mesh it was started for.
     pub(crate) is_membership: bool,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct LocalRequestMetricsSnapshot {
-    pub accepted_request_counts: Vec<u64>,
-    pub latency_samples_ms: Vec<u64>,
-}
-
-#[derive(Default)]
-pub(crate) struct LocalRequestMetricsSampler {
-    pub(crate) inner: std::sync::Mutex<LocalRequestMetricsWindow>,
-}
-
-#[derive(Default)]
-pub(crate) struct LocalRequestMetricsWindow {
-    pub(crate) accepted_by_second: VecDeque<(u64, u64)>,
-    pub(crate) completed_latencies_ms: VecDeque<(u64, u64)>,
 }
 
 pub(crate) struct PeerDownReport {
@@ -268,86 +256,6 @@ pub(crate) fn peer_down_endpoint_id(frame: &crate::proto::node::PeerDown) -> Opt
         Err(_) => {
             tracing::warn!("PeerDown: peer_id is not a valid public key — rejecting");
             None
-        }
-    }
-}
-
-impl LocalRequestMetricsSampler {
-    pub(crate) fn record_request_accepted(&self) {
-        let now_sec = now_secs();
-        let mut guard = self
-            .inner
-            .lock()
-            .expect("pretty request metrics mutex poisoned");
-        guard.prune(now_sec);
-        if let Some((second, count)) = guard.accepted_by_second.back_mut()
-            && *second == now_sec
-        {
-            *count += 1;
-            return;
-        }
-        guard.accepted_by_second.push_back((now_sec, 1));
-    }
-
-    pub(crate) fn record_request_completed(&self, started_at: std::time::Instant) {
-        let now_sec = now_secs();
-        let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let mut guard = self
-            .inner
-            .lock()
-            .expect("pretty request metrics mutex poisoned");
-        guard.prune(now_sec);
-        guard
-            .completed_latencies_ms
-            .push_back((now_sec, latency_ms));
-    }
-
-    pub(crate) fn snapshot(&self) -> LocalRequestMetricsSnapshot {
-        let now_sec = now_secs();
-        let window_start = now_sec.saturating_sub(PRETTY_LOCAL_REQUEST_WINDOW_SECS - 1);
-        let mut guard = self
-            .inner
-            .lock()
-            .expect("pretty request metrics mutex poisoned");
-        guard.prune(now_sec);
-
-        let accepted_by_second = guard
-            .accepted_by_second
-            .iter()
-            .copied()
-            .collect::<HashMap<_, _>>();
-        let accepted_request_counts = (window_start..=now_sec)
-            .map(|second| accepted_by_second.get(&second).copied().unwrap_or(0))
-            .collect();
-        let latency_samples_ms = guard
-            .completed_latencies_ms
-            .iter()
-            .filter_map(|(second, latency_ms)| (*second >= window_start).then_some(*latency_ms))
-            .collect();
-
-        LocalRequestMetricsSnapshot {
-            accepted_request_counts,
-            latency_samples_ms,
-        }
-    }
-}
-
-impl LocalRequestMetricsWindow {
-    pub(crate) fn prune(&mut self, now_sec: u64) {
-        let oldest_kept_second = now_sec.saturating_sub(PRETTY_LOCAL_REQUEST_WINDOW_SECS - 1);
-        while let Some((second, _)) = self.accepted_by_second.front() {
-            if *second < oldest_kept_second {
-                self.accepted_by_second.pop_front();
-            } else {
-                break;
-            }
-        }
-        while let Some((second, _)) = self.completed_latencies_ms.front() {
-            if *second < oldest_kept_second {
-                self.completed_latencies_ms.pop_front();
-            } else {
-                break;
-            }
         }
     }
 }
@@ -828,6 +736,8 @@ impl Node {
             .map_or(mesh_llm_config::DEFAULT_DRAIN_TIMEOUT_MAX_SECS, |config| {
                 config.drain_timeout_max_secs
             });
+        let peer_stage_source_fetch =
+            OwnerRuntimeConfig::peer_stage_source_fetch(owner_config.as_ref());
 
         let node = Node {
             endpoint,
@@ -929,6 +839,7 @@ impl Node {
             public_mesh,
             drain_timeout_secs,
             drain_timeout_max_secs,
+            peer_stage_source_fetch,
             runtime_intents: Arc::new(std::sync::Mutex::new(Vec::new())),
             runtime_instance_lifecycles: Arc::new(std::sync::Mutex::new(HashMap::new())),
             owner_lifecycle_response_cache: OwnerLifecycleResponseCache::default(),
@@ -1120,6 +1031,7 @@ impl Node {
             public_mesh: false,
             drain_timeout_secs: mesh_llm_config::DEFAULT_DRAIN_TIMEOUT_SECS,
             drain_timeout_max_secs: mesh_llm_config::DEFAULT_DRAIN_TIMEOUT_MAX_SECS,
+            peer_stage_source_fetch: Default::default(),
             runtime_intents: Arc::new(std::sync::Mutex::new(Vec::new())),
             runtime_instance_lifecycles: Arc::new(std::sync::Mutex::new(HashMap::new())),
             owner_lifecycle_response_cache: OwnerLifecycleResponseCache::default(),

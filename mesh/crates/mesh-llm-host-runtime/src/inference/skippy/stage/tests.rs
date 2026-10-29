@@ -23,6 +23,7 @@ async fn stage_control_shutdown_closes_and_joins_the_control_loop() {
                     run_id: None,
                     stage_id: None,
                 }),
+                source_fetch: StageSourceFetch::Allowed,
                 resp,
             })
             .is_err(),
@@ -466,14 +467,17 @@ fn inventory_source_resolves_metadata_only_first_shard() {
     .unwrap();
     let expected_bytes = fs::metadata(&first).unwrap().len() + 7 + 11;
 
-    let inventory = resolve_inventory_source(&StageInventoryRequest {
-        model_id: "local-gguf/deepseek-v4-flash".to_string(),
-        runtime_profile: Some(String::new()),
-        package_ref: format!("gguf://{}", first.display()),
-        manifest_sha256: "manifest".to_string(),
-        expected_source_model_sha256: None,
-        local_source_required: false,
-    })
+    let inventory = resolve_inventory_source(
+        &StageInventoryRequest {
+            model_id: "local-gguf/deepseek-v4-flash".to_string(),
+            runtime_profile: Some(String::new()),
+            package_ref: format!("gguf://{}", first.display()),
+            manifest_sha256: "manifest".to_string(),
+            expected_source_model_sha256: None,
+            local_source_required: false,
+        },
+        StageSourceFetch::Allowed,
+    )
     .expect("metadata-only first shard should still advertise inventory");
 
     assert_eq!(inventory.layer_count, 61);
@@ -503,7 +507,7 @@ async fn content_addressed_inventory_proves_local_bytes_without_leaking_path() {
     };
 
     let inventory = StageControlState::default()
-        .inventory(request.clone())
+        .inventory(request.clone(), StageSourceFetch::Allowed)
         .await;
 
     assert_eq!(inventory.layer_count, 61);
@@ -520,7 +524,9 @@ async fn content_addressed_inventory_proves_local_bytes_without_leaking_path() {
 
     std::thread::sleep(Duration::from_millis(50));
     write_metadata_only_gguf(&path, 62);
-    let tampered = StageControlState::default().inventory(request).await;
+    let tampered = StageControlState::default()
+        .inventory(request, StageSourceFetch::Allowed)
+        .await;
     assert_eq!(tampered.content_addressed_local_source, Some(false));
     assert_eq!(tampered.source_model_sha256, None);
     assert!(tampered.available_ranges.is_empty());
@@ -617,7 +623,10 @@ async fn unavailable_native_runtime_rejects_remote_and_local_stage_loads() {
         StageControlRequest::Load(load_request()),
         StageControlRequest::LoadLocal(load_request()),
     ] {
-        let response = state.handle(request).await.unwrap();
+        let response = state
+            .handle(request, StageSourceFetch::Allowed)
+            .await
+            .unwrap();
         let StageControlResponse::Ready(response) = response else {
             panic!("load must return a readiness response");
         };
@@ -631,4 +640,81 @@ async fn unavailable_native_runtime_rejects_remote_and_local_stage_loads() {
         );
         assert!(state.stages.is_empty());
     }
+}
+
+const NEVER_CACHED_PACKAGE: &str = "hf://mesh-llm-tests/never-cached-package@main";
+
+#[tokio::test]
+async fn peer_inventory_without_downloads_reports_nothing_for_an_uncached_package() {
+    let request = StageInventoryRequest {
+        model_id: "org/uncached".to_string(),
+        runtime_profile: Some(String::new()),
+        package_ref: NEVER_CACHED_PACKAGE.to_string(),
+        manifest_sha256: "0".repeat(64),
+        expected_source_model_sha256: None,
+        local_source_required: false,
+    };
+
+    assert!(resolve_inventory_source(&request, StageSourceFetch::LocalOnly).is_none());
+    let inventory = StageControlState::default()
+        .inventory(request, StageSourceFetch::LocalOnly)
+        .await;
+    assert_eq!(inventory.layer_count, 0);
+    assert!(inventory.available_ranges.is_empty());
+    assert!(inventory.missing_ranges.is_empty());
+    assert_eq!(inventory.source_model_path, None);
+}
+
+#[test]
+fn peer_load_without_downloads_refuses_an_uncached_package() {
+    let mut load = load_request();
+    load.load_mode = LoadMode::RuntimeSlice;
+    load.package_ref = NEVER_CACHED_PACKAGE.to_string();
+
+    // The package is exempt here; the stage loop resolves it from cache.
+    StageSourceFetch::LocalOnly
+        .ensure_local_source(&load)
+        .unwrap();
+    let error = super::super::materialization::resolve_stage_load_package(
+        &load,
+        StageSourceFetch::LocalOnly,
+    )
+    .expect_err("an uncached package must not be downloaded for a peer");
+    assert!(
+        format!("{error:#}").contains("refuses peer model downloads"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn peer_load_without_downloads_needs_a_local_model_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let local = dir.path().join("local.gguf");
+    fs::write(&local, b"GGUF").unwrap();
+    let mut load = load_request();
+    load.load_mode = LoadMode::RuntimeSlice;
+    load.package_ref = "gguf://org/remote-only".to_string();
+
+    load.model_path = Some(local.to_string_lossy().to_string());
+    StageSourceFetch::LocalOnly
+        .ensure_local_source(&load)
+        .unwrap();
+
+    load.model_path = Some(
+        dir.path()
+            .join("missing.gguf")
+            .to_string_lossy()
+            .to_string(),
+    );
+    let error = StageSourceFetch::LocalOnly
+        .ensure_local_source(&load)
+        .expect_err("a load with no local source must be refused")
+        .to_string();
+    assert!(
+        error.contains("model model-a is not on local disk"),
+        "{error}"
+    );
+    StageSourceFetch::Allowed
+        .ensure_local_source(&load)
+        .unwrap();
 }
