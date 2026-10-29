@@ -677,15 +677,16 @@ fn split_stage_source_exclusion_reason(
     model_ref: &str,
     node: &SplitReadinessNodeInput,
 ) -> Option<SplitReadinessExclusionReason> {
+    // A declared model source does not name the model, so it cannot show that
+    // a refusing peer has this one on disk. Only serving or advertising it can.
+    if node.refuses_peer_model_downloads && !node_advertises_model(model_ref, node) {
+        return Some(SplitReadinessExclusionReason::PeerModelDownloadsRefused);
+    }
     if node_has_stage_source(model_ref, node) {
         return None;
     }
     if node_has_package_manifest_mismatch_signal(model_ref, node) {
         return Some(SplitReadinessExclusionReason::PackageManifestMismatch);
-    }
-    // Without the model advertised on its disk, a refusing peer cannot stage.
-    if node.refuses_peer_model_downloads {
-        return Some(SplitReadinessExclusionReason::PeerModelDownloadsRefused);
     }
     if !node.artifact_transfer_supported {
         return Some(SplitReadinessExclusionReason::ArtifactTransferUnavailable);
@@ -694,6 +695,14 @@ fn split_stage_source_exclusion_reason(
         return Some(SplitReadinessExclusionReason::StageInventoryEmpty);
     }
     Some(SplitReadinessExclusionReason::MissingModelSource)
+}
+
+fn node_advertises_model(model_ref: &str, node: &SplitReadinessNodeInput) -> bool {
+    node.serving_models
+        .iter()
+        .chain(node.hosted_models.iter())
+        .chain(node.available_models.iter())
+        .any(|candidate| model_matches(candidate, model_ref))
 }
 
 fn node_has_package_manifest_mismatch_signal(
@@ -996,6 +1005,9 @@ mod tests {
             &[model_ref],
         );
         refusing.refuses_peer_model_downloads = true;
+        // As on a live node: it declares the source of the model it serves,
+        // which is not the one being split.
+        refusing.model_source = Some("/models/Qwen3-1.7B-Q4_K_M.gguf".to_string());
         let mut refusing_with_model = node(
             "peer111111111111111111111111111111111",
             SplitReadinessNodeRole::Worker,
