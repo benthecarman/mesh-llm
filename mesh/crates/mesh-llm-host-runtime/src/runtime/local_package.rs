@@ -207,6 +207,9 @@ pub(super) enum SplitParticipantExclusionReason {
     PackageManifestMismatch,
     UnverifiedLocalSource,
     MissingModelSource,
+    /// The peer advertises `runtime.peer_model_downloads = false` and does not
+    /// have the package on local disk, so it would refuse a stage load.
+    PeerModelDownloadsRefused,
 }
 
 impl SplitParticipantExclusionReason {
@@ -223,6 +226,7 @@ impl SplitParticipantExclusionReason {
             Self::PackageManifestMismatch => "package_manifest_mismatch",
             Self::UnverifiedLocalSource => "unverified_local_source",
             Self::MissingModelSource => "missing_model_source",
+            Self::PeerModelDownloadsRefused => "peer_model_downloads_refused",
         }
     }
 
@@ -258,6 +262,9 @@ impl SplitParticipantExclusionReason {
             }
             Self::MissingModelSource => {
                 "Start the peer with a resolvable package source or wait for stage inventory to prove the package is available."
+            }
+            Self::PeerModelDownloadsRefused => {
+                "This peer refuses peer model downloads. Download the model on it first, or turn runtime.peer_model_downloads back on."
             }
         }
     }
@@ -475,12 +482,13 @@ fn split_participant_blocker(
 }
 
 pub(super) const fn split_participant_exclusion_reason_order()
--> [SplitParticipantExclusionReason; 11] {
+-> [SplitParticipantExclusionReason; 12] {
     [
         SplitParticipantExclusionReason::Blocked,
         SplitParticipantExclusionReason::StageControlUnreachable,
         SplitParticipantExclusionReason::PackageManifestMismatch,
         SplitParticipantExclusionReason::UnverifiedLocalSource,
+        SplitParticipantExclusionReason::PeerModelDownloadsRefused,
         SplitParticipantExclusionReason::ArtifactTransferUnavailable,
         SplitParticipantExclusionReason::StageInventoryEmpty,
         SplitParticipantExclusionReason::MissingModelSource,
@@ -614,8 +622,10 @@ pub(super) async fn collect_split_participants(
             continue;
         }
 
-        let artifact_transfer_allowed = node.artifact_transfer_allowed_for_peer(&peer).await;
-        match split_peer_package_signal(
+        // A peer that refuses downloads also skips the artifact prefetch.
+        let artifact_transfer_allowed = !peer.refuses_peer_model_downloads
+            && node.artifact_transfer_allowed_for_peer(&peer).await;
+        let package_signal = split_peer_package_signal(
             node,
             peer.id,
             model_ref,
@@ -624,8 +634,8 @@ pub(super) async fn collect_split_participants(
             artifact_transfer_allowed,
             local_source_required,
         )
-        .await
-        {
+        .await;
+        match split_peer_download_refusal(peer.refuses_peer_model_downloads, package_signal) {
             Ok(package_signal) => {
                 participants.push(
                     SplitParticipant::new(peer.id, peer.vram_bytes, peer.first_joined_mesh_ts)
@@ -782,6 +792,33 @@ pub(super) fn split_inventory_package_signal_result(
         return Err(SplitParticipantExclusionReason::ArtifactTransferUnavailable);
     }
     Err(SplitParticipantExclusionReason::MissingModelSource)
+}
+
+/// A peer that advertises `refuses_peer_model_downloads` only runs a stage
+/// from files already on its disk. Exclude it when its inventory shows it
+/// would have to fetch, so the coordinator never sends it a doomed load.
+pub(super) fn split_peer_download_refusal(
+    refuses_peer_model_downloads: bool,
+    package_signal: std::result::Result<
+        SplitParticipantPackageSignal,
+        SplitParticipantExclusionReason,
+    >,
+) -> std::result::Result<SplitParticipantPackageSignal, SplitParticipantExclusionReason> {
+    if !refuses_peer_model_downloads {
+        return package_signal;
+    }
+    match package_signal {
+        Ok(signal) if signal.missing_artifact_bytes > 0 => {
+            Err(SplitParticipantExclusionReason::PeerModelDownloadsRefused)
+        }
+        // A refusing peer reports nothing for a package it has not cached.
+        Err(
+            SplitParticipantExclusionReason::StageInventoryEmpty
+            | SplitParticipantExclusionReason::ArtifactTransferUnavailable
+            | SplitParticipantExclusionReason::MissingModelSource,
+        ) => Err(SplitParticipantExclusionReason::PeerModelDownloadsRefused),
+        other => other,
+    }
 }
 
 pub(super) fn split_inventory_identity_mismatch(

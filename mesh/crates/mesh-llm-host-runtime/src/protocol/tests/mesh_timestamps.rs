@@ -51,6 +51,7 @@ fn test_peer_announcement_first_joined_mesh_ts_roundtrip() {
         stage_status_list_supported: true,
         local_gguf_content_id_supported: true,
         decode_batch_policy_supported: true,
+        refuses_peer_model_downloads: false,
         advertised_model_throughput: vec![],
         #[cfg(feature = "payments")]
         lightning_offers: Default::default(),
@@ -114,6 +115,7 @@ fn test_peer_announcement_first_joined_mesh_ts_roundtrip() {
         stage_status_list_supported: false,
         local_gguf_content_id_supported: false,
         decode_batch_policy_supported: false,
+        refuses_peer_model_downloads: false,
         advertised_model_throughput: vec![],
         #[cfg(feature = "payments")]
         lightning_offers: Default::default(),

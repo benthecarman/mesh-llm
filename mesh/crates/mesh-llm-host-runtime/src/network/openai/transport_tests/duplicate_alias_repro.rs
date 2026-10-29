@@ -69,6 +69,7 @@ pub(super) fn duplicate_peer(peer_id: iroh::EndpointId, model: &str) -> mesh::Pe
         owner_summary: crate::crypto::OwnershipSummary::default(),
         inference_admission_state: None,
         decode_batch_policy_supported: false,
+        refuses_peer_model_downloads: false,
     }
 }
 

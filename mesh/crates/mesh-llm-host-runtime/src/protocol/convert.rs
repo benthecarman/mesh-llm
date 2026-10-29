@@ -931,6 +931,8 @@ pub(crate) fn local_ann_to_proto_ann(
             ann.local_gguf_content_id_supported,
         ),
         inference_admission_state: ann.inference_admission_state.map(|state| state as i32),
+        // Sent only when set, so the bytes of a default node do not change.
+        refuses_peer_model_downloads: ann.refuses_peer_model_downloads.then_some(true),
         lightning_offers: {
             #[cfg(feature = "payments")]
             {
@@ -1197,6 +1199,8 @@ pub(crate) fn proto_ann_to_local(
         stage_status_list_supported: supports_skippy_status_list(&pa.subprotocols),
         local_gguf_content_id_supported: supports_local_gguf_content_id(&pa.subprotocols),
         decode_batch_policy_supported: supports_decode_batch_policy(&pa.subprotocols),
+        // Absent on older peers, which accept peer model downloads.
+        refuses_peer_model_downloads: pa.refuses_peer_model_downloads.unwrap_or(false),
         advertised_model_throughput: pa
             .advertised_model_throughput
             .iter()

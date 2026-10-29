@@ -182,6 +182,7 @@ fn make_test_peer_info(peer_id: EndpointId) -> PeerInfo {
         stage_status_list_supported: false,
         local_gguf_content_id_supported: false,
         decode_batch_policy_supported: false,
+        refuses_peer_model_downloads: false,
         owner_summary: OwnershipSummary::default(),
         advertised_model_throughput: vec![],
         #[cfg(feature = "payments")]
@@ -201,6 +202,7 @@ mod control_frames;
 mod frame_reading;
 mod mesh_timestamps;
 mod owner_control;
+mod peer_model_downloads;
 
 pub(crate) use announcements::assert_mixed_version_peer_ignores_missing_release_attestation;
 pub(crate) use config::mesh_requirements_survive_owner_control_config_round_trip;

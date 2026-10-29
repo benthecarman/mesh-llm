@@ -155,6 +155,7 @@ pub fn peer_meaningfully_changed(old: &PeerInfo, new: &PeerInfo) -> bool {
         || old.stage_status_list_supported != new.stage_status_list_supported
         || old.local_gguf_content_id_supported != new.local_gguf_content_id_supported
         || old.decode_batch_policy_supported != new.decode_batch_policy_supported
+        || old.refuses_peer_model_downloads != new.refuses_peer_model_downloads
         || lightning_offers_changed(old, new)
         || crate::advertised_state_changed(&old.cache_affinity, &new.cache_affinity)
         || old.version != new.version
@@ -252,6 +253,8 @@ pub fn apply_transitive_ann(
     // peer itself. A transitive announcer is not authoritative in either
     // direction, so it may neither promote nor clear them. Direct announcements
     // update both fields authoritatively.
+    // `refuses_peer_model_downloads` is the same: an older relay drops the
+    // field, so a relayed copy must not clear what the peer said directly.
     existing.advertised_model_throughput = ann.advertised_model_throughput.clone();
     #[cfg(feature = "payments")]
     {
@@ -341,6 +344,7 @@ pub fn announcement_from_peer(peer: &PeerInfo) -> PeerAnnouncement {
         stage_status_list_supported: peer.stage_status_list_supported,
         local_gguf_content_id_supported: peer.local_gguf_content_id_supported,
         decode_batch_policy_supported: peer.decode_batch_policy_supported,
+        refuses_peer_model_downloads: peer.refuses_peer_model_downloads,
         advertised_model_throughput: peer.advertised_model_throughput.clone(),
         #[cfg(feature = "payments")]
         lightning_offers: peer.lightning_offers.clone(),
@@ -427,6 +431,7 @@ pub fn update_existing_direct_peer(
     existing.stage_status_list_supported = ann.stage_status_list_supported;
     existing.local_gguf_content_id_supported = ann.local_gguf_content_id_supported;
     existing.decode_batch_policy_supported = ann.decode_batch_policy_supported;
+    existing.refuses_peer_model_downloads = ann.refuses_peer_model_downloads;
     existing.advertised_model_throughput = ann.advertised_model_throughput.clone();
     #[cfg(feature = "payments")]
     {

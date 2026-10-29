@@ -30,6 +30,8 @@ pub(crate) struct SplitReadinessNodeInput {
     pub(crate) model_source: Option<String>,
     pub(crate) stage_protocol_generation_supported: bool,
     pub(crate) artifact_transfer_supported: bool,
+    /// The peer advertises `runtime.peer_model_downloads = false`.
+    pub(crate) refuses_peer_model_downloads: bool,
     /// The operator blocked this peer (or holds a plugin's block). Split
     /// stages receive the user's content, so a blocked peer is never a
     /// candidate.
@@ -142,6 +144,7 @@ impl MeshApi {
             model_source: None,
             stage_protocol_generation_supported: true,
             artifact_transfer_supported: true,
+            refuses_peer_model_downloads: false,
             blocked: false,
             stage_path: SplitStagePathSnapshot::unknown(),
         };
@@ -229,6 +232,7 @@ fn peer_readiness_input(
         model_source: peer.model_source,
         stage_protocol_generation_supported: peer.stage_protocol_generation_supported,
         artifact_transfer_supported: peer.artifact_transfer_supported,
+        refuses_peer_model_downloads: peer.refuses_peer_model_downloads,
         blocked,
         stage_path,
     }
@@ -590,11 +594,12 @@ fn split_capacity_shortfall_blocker(
     })
 }
 
-const fn split_readiness_exclusion_reason_order() -> [SplitReadinessExclusionReason; 10] {
+const fn split_readiness_exclusion_reason_order() -> [SplitReadinessExclusionReason; 11] {
     [
         SplitReadinessExclusionReason::Blocked,
         SplitReadinessExclusionReason::StageControlUnreachable,
         SplitReadinessExclusionReason::PackageManifestMismatch,
+        SplitReadinessExclusionReason::PeerModelDownloadsRefused,
         SplitReadinessExclusionReason::ArtifactTransferUnavailable,
         SplitReadinessExclusionReason::StageInventoryEmpty,
         SplitReadinessExclusionReason::MissingModelSource,
@@ -678,6 +683,10 @@ fn split_stage_source_exclusion_reason(
     if node_has_package_manifest_mismatch_signal(model_ref, node) {
         return Some(SplitReadinessExclusionReason::PackageManifestMismatch);
     }
+    // Without the model advertised on its disk, a refusing peer cannot stage.
+    if node.refuses_peer_model_downloads {
+        return Some(SplitReadinessExclusionReason::PeerModelDownloadsRefused);
+    }
     if !node.artifact_transfer_supported {
         return Some(SplitReadinessExclusionReason::ArtifactTransferUnavailable);
     }
@@ -743,6 +752,7 @@ enum SplitReadinessExclusionReason {
     StageInventoryEmpty,
     PackageManifestMismatch,
     MissingModelSource,
+    PeerModelDownloadsRefused,
 }
 
 impl SplitReadinessExclusionReason {
@@ -758,6 +768,7 @@ impl SplitReadinessExclusionReason {
             Self::StageInventoryEmpty => "stage_inventory_empty",
             Self::PackageManifestMismatch => "package_manifest_mismatch",
             Self::MissingModelSource => "missing_model_source",
+            Self::PeerModelDownloadsRefused => "peer_model_downloads_refused",
         }
     }
 
@@ -790,6 +801,9 @@ impl SplitReadinessExclusionReason {
             }
             Self::MissingModelSource => {
                 "Ensure this peer can resolve or inventory the layer package before split serving."
+            }
+            Self::PeerModelDownloadsRefused => {
+                "This peer refuses peer model downloads. Download the model on it first, or turn runtime.peer_model_downloads back on."
             }
         }
     }
@@ -837,6 +851,7 @@ mod tests {
             model_source: None,
             stage_protocol_generation_supported: true,
             artifact_transfer_supported: true,
+            refuses_peer_model_downloads: false,
             blocked: false,
             stage_path: crate::mesh::SplitStagePathSnapshot::direct(Some(4)),
         }
@@ -970,6 +985,42 @@ mod tests {
         assert_eq!(report.verdict, SplitReadinessVerdict::Ready);
         assert_eq!(report.participants.len(), 2);
         assert!(report.exclusions.is_empty());
+    }
+
+    #[test]
+    fn split_readiness_excludes_peer_refusing_downloads_without_the_model() {
+        let model_ref = "meshllm/Qwen3-8B-Q4_K_M-layers";
+        let mut refusing = node(
+            "peer000000000000000000000000000000000",
+            SplitReadinessNodeRole::Worker,
+            &[model_ref],
+        );
+        refusing.refuses_peer_model_downloads = true;
+        let mut refusing_with_model = node(
+            "peer111111111111111111111111111111111",
+            SplitReadinessNodeRole::Worker,
+            &[model_ref],
+        );
+        refusing_with_model.refuses_peer_model_downloads = true;
+        refusing_with_model.available_models = vec![model_ref.to_string()];
+
+        let report = build_split_readiness_report(SplitReadinessInput {
+            model_ref: model_ref.to_string(),
+            local: local_node(&[model_ref]),
+            peers: vec![refusing, refusing_with_model],
+            capacity_advice: Some(advice(ModelTargetCapacityAdviceState::SplitCandidate)),
+            active_topology_count: 0,
+            active_stage_count: 0,
+        });
+
+        assert_eq!(report.participant_count, 2);
+        assert_eq!(report.exclusions.len(), 1);
+        assert_eq!(report.exclusions[0].reason, "peer_model_downloads_refused");
+        assert!(
+            report.exclusions[0]
+                .recommendation
+                .contains("runtime.peer_model_downloads")
+        );
     }
 
     #[test]

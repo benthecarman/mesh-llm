@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 mod capacity_budget;
 mod content_attestation;
+mod peer_model_downloads;
 
 fn lifecycle_config() -> plugin::MeshConfig {
     toml::from_str(

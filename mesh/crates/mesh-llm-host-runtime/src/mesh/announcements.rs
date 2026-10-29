@@ -285,6 +285,7 @@ impl Node {
             // Advertised unconditionally: there is no build-time variability
             // behind it, unlike artifact transfer.
             decode_batch_policy_supported: true,
+            refuses_peer_model_downloads: !self.peer_stage_source_fetch.allows_fetch(),
             advertised_model_throughput: data.advertised_model_throughput,
             #[cfg(feature = "payments")]
             lightning_offers: data.lightning_offers.into(),
