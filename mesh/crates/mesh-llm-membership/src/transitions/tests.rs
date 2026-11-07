@@ -296,3 +296,52 @@ fn heartbeat_gc_expires_each_cooldown_without_removing_peer_records() {
     assert!(state.direct_path_request_last_at.contains_key(&live_id));
     assert!(state.peers.contains_key(&expired_id));
 }
+
+fn numbered_announcement(n: u16) -> PeerAnnouncement {
+    let mut seed = [0x5a; 32];
+    seed[..2].copy_from_slice(&n.to_le_bytes());
+    let mut ann = test_announcement(None);
+    ann.addr = EndpointAddr {
+        id: EndpointId::from(SecretKey::from_bytes(&seed).public()),
+        addrs: Default::default(),
+    };
+    ann
+}
+
+#[test]
+fn bridges_cannot_grow_transitive_peers_past_the_cap() {
+    let mut state = MembershipState::default();
+    let cap = u16::try_from(MAX_TRANSITIVE_PEERS).unwrap();
+    for n in 0..cap {
+        assert!(matches!(
+            apply(&mut state, &numbered_announcement(n)),
+            TransitivePeerUpdate::Added(_)
+        ));
+    }
+    assert_eq!(state.transitive_peer_count(), MAX_TRANSITIVE_PEERS);
+
+    let overflow = numbered_announcement(cap);
+    assert!(matches!(
+        apply(&mut state, &overflow),
+        TransitivePeerUpdate::Ignored
+    ));
+    assert!(!state.peers.contains_key(&overflow.addr.id));
+    // Peers already held keep converging.
+    assert!(matches!(
+        apply(&mut state, &numbered_announcement(0)),
+        TransitivePeerUpdate::Updated { .. }
+    ));
+
+    // Direct admission moves a peer out of the transitive budget.
+    let promoted = numbered_announcement(1);
+    state.insert_new_direct_peer(
+        promoted.addr.id,
+        promoted.addr.clone(),
+        &promoted,
+        OwnershipSummary::default(),
+    );
+    assert!(matches!(
+        apply(&mut state, &overflow),
+        TransitivePeerUpdate::Added(_)
+    ));
+}

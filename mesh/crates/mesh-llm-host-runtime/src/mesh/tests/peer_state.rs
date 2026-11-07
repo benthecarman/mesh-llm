@@ -1193,7 +1193,7 @@ fn transitive_peer_merge_preserves_richer_direct_address() {
 }
 
 #[test]
-fn tunnel_map_roundtrip_updates_remote_map() {
+fn tunnel_map_roundtrip_parses_entries() {
     use crate::proto::node::{TunnelEntry, TunnelMap};
 
     let owner_key = SecretKey::from_bytes(&[0x10; 32]);
@@ -1222,14 +1222,8 @@ fn tunnel_map_roundtrip_updates_remote_map() {
     assert_eq!(decoded.entries[0].target_peer_id, target_bytes);
     assert_eq!(decoded.entries[0].tunnel_port, 50001);
 
-    let mut remote_tunnel_maps: HashMap<EndpointId, HashMap<EndpointId, u16>> = HashMap::new();
-    ingest_tunnel_map(owner_id, &decoded, &mut remote_tunnel_maps)
-        .expect("valid tunnel map must ingest successfully");
-
-    assert_eq!(remote_tunnel_maps.len(), 1);
-    let inner = remote_tunnel_maps
-        .get(&owner_id)
-        .expect("owner must be present in remote_tunnel_maps");
+    let inner =
+        parse_tunnel_map(owner_id, &decoded).expect("valid tunnel map must parse successfully");
     assert_eq!(inner.len(), 1);
     let port = inner
         .get(&target_id)
@@ -1294,13 +1288,8 @@ fn tunnel_map_rejects_owner_mismatch_or_bad_target_id() {
             relay_peer_id: None,
         }],
     };
-    let mut remote_tunnel_maps: HashMap<EndpointId, HashMap<EndpointId, u16>> = HashMap::new();
-    let result = ingest_tunnel_map(different_id, &mismatched_frame, &mut remote_tunnel_maps);
+    let result = parse_tunnel_map(different_id, &mismatched_frame);
     assert!(result.is_err(), "owner mismatch must be rejected");
-    assert!(
-        remote_tunnel_maps.is_empty(),
-        "mismatched owner must not populate remote_tunnel_maps"
-    );
 
     let oversized_port_frame = TunnelMap {
         owner_peer_id: owner_bytes.clone(),
@@ -1310,13 +1299,8 @@ fn tunnel_map_rejects_owner_mismatch_or_bad_target_id() {
             relay_peer_id: None,
         }],
     };
-    let mut remote_tunnel_maps: HashMap<EndpointId, HashMap<EndpointId, u16>> = HashMap::new();
-    let result = ingest_tunnel_map(owner_id, &oversized_port_frame, &mut remote_tunnel_maps);
+    let result = parse_tunnel_map(owner_id, &oversized_port_frame);
     assert!(result.is_err(), "tunnel_port > u16::MAX must be rejected");
-    assert!(
-        remote_tunnel_maps.is_empty(),
-        "oversized tunnel_port must not populate remote_tunnel_maps"
-    );
 }
 
 #[test]

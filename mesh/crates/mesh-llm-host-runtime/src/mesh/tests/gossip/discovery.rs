@@ -2,16 +2,34 @@
 pub(crate) async fn future_demand_timestamps_are_active_without_underflow() {
     let node = Node::new_for_tests(NodeRole::Worker).await.unwrap();
     let now = now_secs();
-    node.merge_remote_demand(&HashMap::from([(
-        "future-demand".to_string(),
-        ModelDemand {
-            last_active: now + DEMAND_TTL_SECS + 60,
-            request_count: 3,
-        },
-    )]));
+    // Peer clocks may run slightly ahead; a timestamp inside the allowed skew
+    // is kept and must not underflow the TTL arithmetic.
+    node.merge_remote_demand(&HashMap::from([
+        (
+            "future-demand".to_string(),
+            ModelDemand {
+                last_active: now + mesh_llm_types::mesh::MAX_DEMAND_CLOCK_SKEW_SECS / 2,
+                request_count: 3,
+            },
+        ),
+        (
+            "planted-demand".to_string(),
+            ModelDemand {
+                last_active: now + DEMAND_TTL_SECS + 60,
+                request_count: 3,
+            },
+        ),
+    ]))
+    .await;
 
     let active = node.active_demand().await;
     assert!(active.contains_key("future-demand"));
+    // Further ahead would never expire, so the merge clamps it to the skew
+    // bound and it ages out on the normal TTL.
+    assert!(
+        active["planted-demand"].last_active
+            <= now_secs() + mesh_llm_types::mesh::MAX_DEMAND_CLOCK_SKEW_SECS
+    );
 
     node.gc_demand().await;
     assert!(node.get_demand().contains_key("future-demand"));

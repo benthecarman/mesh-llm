@@ -294,16 +294,22 @@ pub fn should_remove_connection(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PeerDownReportDisposition {
+    /// The target is neither in the peer table nor connected. Recording it
+    /// as dead would let any peer grow `dead_peers` with made-up ids.
+    IgnoreUnknownPeer,
     SuppressReporterCooldown,
     RejectRecentlySeen,
     ProbeReachability,
 }
 
 pub fn peer_down_report_disposition(
+    target_known: bool,
     reporter_cooled: bool,
     recently_seen: bool,
 ) -> PeerDownReportDisposition {
-    if reporter_cooled {
+    if !target_known {
+        PeerDownReportDisposition::IgnoreUnknownPeer
+    } else if reporter_cooled {
         PeerDownReportDisposition::SuppressReporterCooldown
     } else if recently_seen {
         PeerDownReportDisposition::RejectRecentlySeen

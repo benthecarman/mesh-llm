@@ -203,14 +203,108 @@ pub struct AdvertisedMemory {
     pub ram_offload_bytes: u64,
 }
 
+/// Most demand entries a merge from gossip will grow the local map to.
+/// Demand is re-gossiped mesh-wide, so without a ceiling one peer could plant
+/// any number of model names in every node's map.
+pub const MAX_DEMAND_ENTRIES: usize = 512;
+
+/// Longest model reference accepted from a peer's demand map, in bytes.
+pub const MAX_DEMAND_MODEL_NAME_BYTES: usize = 512;
+
+/// How far ahead of the local clock a peer's `last_active` may be. Later
+/// timestamps are clamped to this bound; unclamped, they would keep the entry
+/// inside [`DEMAND_TTL_SECS`] indefinitely.
+pub const MAX_DEMAND_CLOCK_SKEW_SECS: u64 = 300;
+
+/// Merge a peer's demand map into ours at the current wall-clock time, with
+/// no entry protected from eviction.
 pub fn merge_demand(
     ours: &mut HashMap<String, ModelDemand>,
     theirs: &HashMap<String, ModelDemand>,
 ) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    merge_demand_at(ours, theirs, now, |_| false);
+}
+
+/// Merge a peer's demand map into ours, treating `now` as the current Unix
+/// time in seconds.
+///
+/// Entries with an empty or oversized model name are dropped, and a
+/// `last_active` further ahead than [`MAX_DEMAND_CLOCK_SKEW_SECS`] is clamped
+/// to that bound. Known models are always updated. New models are added
+/// freshest first; once the map holds [`MAX_DEMAND_ENTRIES`], a new model
+/// replaces the stalest entry that `is_protected` does not hold, and only if
+/// the new model is fresher. A full map therefore recovers as soon as planted
+/// entries stop being refreshed, instead of after [`DEMAND_TTL_SECS`].
+pub fn merge_demand_at(
+    ours: &mut HashMap<String, ModelDemand>,
+    theirs: &HashMap<String, ModelDemand>,
+    now: u64,
+    is_protected: impl Fn(&str) -> bool,
+) {
+    let latest_allowed = now.saturating_add(MAX_DEMAND_CLOCK_SKEW_SECS);
+    let mut new_models = Vec::new();
     for (model, their_demand) in theirs {
-        let entry = ours.entry(model.clone()).or_default();
-        entry.last_active = entry.last_active.max(their_demand.last_active);
-        entry.request_count = entry.request_count.max(their_demand.request_count);
+        if model.is_empty() || model.len() > MAX_DEMAND_MODEL_NAME_BYTES {
+            continue;
+        }
+        let last_active = their_demand.last_active.min(latest_allowed);
+        match ours.get_mut(model) {
+            Some(entry) => {
+                entry.last_active = entry.last_active.max(last_active);
+                entry.request_count = entry.request_count.max(their_demand.request_count);
+            }
+            None => new_models.push((
+                model,
+                ModelDemand {
+                    last_active,
+                    request_count: their_demand.request_count,
+                },
+            )),
+        }
+    }
+    admit_new_demand(ours, new_models, is_protected);
+}
+
+/// Insert models not yet in `ours`, freshest first, within
+/// [`MAX_DEMAND_ENTRIES`]; see [`merge_demand_at`].
+fn admit_new_demand(
+    ours: &mut HashMap<String, ModelDemand>,
+    mut new_models: Vec<(&String, ModelDemand)>,
+    is_protected: impl Fn(&str) -> bool,
+) {
+    let mut room = MAX_DEMAND_ENTRIES.saturating_sub(ours.len());
+    let mut stalest_first = Vec::new();
+    if new_models.len() > room {
+        new_models.sort_unstable_by(|(a_model, a), (b_model, b)| {
+            b.last_active
+                .cmp(&a.last_active)
+                .then_with(|| a_model.cmp(b_model))
+        });
+        stalest_first = ours
+            .iter()
+            .filter(|(model, _)| !is_protected(model))
+            .map(|(model, demand)| (model.clone(), demand.last_active))
+            .collect();
+        stalest_first.sort_unstable_by(|(a_model, a), (b_model, b)| {
+            a.cmp(b).then_with(|| a_model.cmp(b_model))
+        });
+    }
+    let mut evictable = stalest_first.into_iter().peekable();
+    for (model, demand) in new_models {
+        if room > 0 {
+            room -= 1;
+        } else if let Some((evicted, _)) =
+            evictable.next_if(|(_, last_active)| *last_active < demand.last_active)
+        {
+            ours.remove(&evicted);
+        } else {
+            // New models are sorted freshest first: no later one can evict.
+            break;
+        }
+        ours.insert(model.clone(), demand);
     }
 }
 
@@ -514,4 +608,126 @@ fn identity_hash_for(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+#[cfg(test)]
+mod demand_tests {
+    use super::*;
+
+    const NOW: u64 = 1_800_000_000;
+
+    fn demand(last_active: u64, request_count: u64) -> ModelDemand {
+        ModelDemand {
+            last_active,
+            request_count,
+        }
+    }
+
+    fn merge(ours: &mut HashMap<String, ModelDemand>, theirs: &HashMap<String, ModelDemand>) {
+        merge_demand_at(ours, theirs, NOW, |_| false);
+    }
+
+    fn full_map(last_active: u64) -> HashMap<String, ModelDemand> {
+        (0..MAX_DEMAND_ENTRIES)
+            .map(|i| (format!("model-{i}"), demand(last_active, 1)))
+            .collect()
+    }
+
+    #[test]
+    fn merge_clamps_demand_timestamped_in_the_future() {
+        let latest_allowed = NOW + MAX_DEMAND_CLOCK_SKEW_SECS;
+        let mut ours = HashMap::from([("known".to_string(), demand(NOW - 10, 1))]);
+        let theirs = HashMap::from([
+            ("known".to_string(), demand(u64::MAX, u64::MAX)),
+            ("planted".to_string(), demand(u64::MAX, 1)),
+            ("skewed".to_string(), demand(NOW + 60, 2)),
+        ]);
+
+        merge(&mut ours, &theirs);
+
+        assert_eq!(ours["known"].last_active, latest_allowed);
+        assert_eq!(ours["known"].request_count, u64::MAX);
+        assert_eq!(ours["planted"].last_active, latest_allowed);
+        assert_eq!(ours["skewed"].last_active, NOW + 60);
+        // Clamped entries still expire on the normal TTL.
+        assert!(latest_allowed.saturating_sub(NOW) < DEMAND_TTL_SECS);
+    }
+
+    #[test]
+    fn merge_drops_empty_and_oversized_model_names() {
+        let mut ours = HashMap::new();
+        let theirs = HashMap::from([
+            (String::new(), demand(NOW, 1)),
+            ("x".repeat(MAX_DEMAND_MODEL_NAME_BYTES + 1), demand(NOW, 1)),
+            ("x".repeat(MAX_DEMAND_MODEL_NAME_BYTES), demand(NOW, 1)),
+        ]);
+
+        merge(&mut ours, &theirs);
+
+        assert_eq!(ours.len(), 1);
+        assert!(ours.contains_key(&"x".repeat(MAX_DEMAND_MODEL_NAME_BYTES)));
+    }
+
+    #[test]
+    fn merge_caps_new_entries_and_keeps_the_freshest() {
+        let mut ours = HashMap::from([("ours".to_string(), demand(NOW - 1000, 1))]);
+        let theirs: HashMap<_, _> = (0..MAX_DEMAND_ENTRIES as u64 * 2)
+            .map(|i| (format!("new-{i}"), demand(NOW - i, 1)))
+            .collect();
+
+        merge(&mut ours, &theirs);
+
+        // Every newcomer down to `new-{MAX-1}` is fresher than `ours`, so the
+        // map ends up holding exactly the freshest MAX_DEMAND_ENTRIES.
+        assert_eq!(ours.len(), MAX_DEMAND_ENTRIES);
+        assert!(!ours.contains_key("ours"));
+        assert!(ours.contains_key("new-0"));
+        assert!(ours.contains_key(&format!("new-{}", MAX_DEMAND_ENTRIES - 1)));
+        assert!(!ours.contains_key(&format!("new-{MAX_DEMAND_ENTRIES}")));
+    }
+
+    #[test]
+    fn full_map_updates_known_models_and_refuses_staler_newcomers() {
+        let mut ours = full_map(NOW - 500);
+        let theirs = HashMap::from([
+            ("model-0".to_string(), demand(NOW, 7)),
+            ("stale-newcomer".to_string(), demand(NOW - 600, 1)),
+        ]);
+
+        merge(&mut ours, &theirs);
+
+        assert_eq!(ours.len(), MAX_DEMAND_ENTRIES);
+        assert_eq!(ours["model-0"].last_active, NOW);
+        assert_eq!(ours["model-0"].request_count, 7);
+        assert!(!ours.contains_key("stale-newcomer"));
+    }
+
+    #[test]
+    fn full_map_evicts_stalest_unprotected_entry_for_fresher_demand() {
+        let mut ours = full_map(NOW - 100);
+        ours.insert("model-0".to_string(), demand(NOW - 900, 1));
+        ours.insert("model-1".to_string(), demand(NOW - 800, 1));
+        let theirs = HashMap::from([("fresh".to_string(), demand(NOW, 1))]);
+
+        merge_demand_at(&mut ours, &theirs, NOW, |model| model == "model-0");
+
+        assert_eq!(ours.len(), MAX_DEMAND_ENTRIES);
+        assert!(ours.contains_key("fresh"));
+        assert!(ours.contains_key("model-0"), "protected entry is kept");
+        assert!(
+            !ours.contains_key("model-1"),
+            "stalest unprotected entry goes"
+        );
+    }
+
+    #[test]
+    fn full_map_of_protected_entries_admits_nothing() {
+        let mut ours = full_map(NOW - 900);
+        let theirs = HashMap::from([("fresh".to_string(), demand(NOW, 1))]);
+
+        merge_demand_at(&mut ours, &theirs, NOW, |_| true);
+
+        assert_eq!(ours.len(), MAX_DEMAND_ENTRIES);
+        assert!(!ours.contains_key("fresh"));
+    }
 }

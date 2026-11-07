@@ -243,46 +243,6 @@ pub fn stream_allowed_before_admission(stream_type: u8, trust_policy: TrustPolic
     stream_type == STREAM_ROUTE_REQUEST || stream_type == STREAM_TUNNEL_HTTP
 }
 
-pub fn ingest_tunnel_map(
-    remote: EndpointId,
-    frame: &proto_node::TunnelMap,
-    remote_tunnel_maps: &mut HashMap<EndpointId, HashMap<EndpointId, u16>>,
-) -> anyhow::Result<()> {
-    if frame.owner_peer_id.as_slice() != remote.as_bytes() {
-        anyhow::bail!(
-            "TunnelMap owner_peer_id mismatch: frame claims owner {}, but connected peer is {}",
-            hex::encode(&frame.owner_peer_id),
-            remote.fmt_short()
-        );
-    }
-
-    let mut tunnel_map: HashMap<EndpointId, u16> = HashMap::new();
-    for entry in &frame.entries {
-        if entry.target_peer_id.len() != 32 {
-            anyhow::bail!(
-                "TunnelMap entry has invalid target_peer_id length: {} (expected 32)",
-                entry.target_peer_id.len()
-            );
-        }
-        if entry.tunnel_port > u16::MAX as u32 {
-            anyhow::bail!(
-                "TunnelMap entry has out-of-range tunnel_port: {} (max {})",
-                entry.tunnel_port,
-                u16::MAX
-            );
-        }
-        let arr: [u8; 32] = entry.target_peer_id.as_slice().try_into().unwrap();
-        let eid = EndpointId::from(
-            PublicKey::from_bytes(&arr)
-                .map_err(|e| anyhow::anyhow!("Invalid target_peer_id bytes: {e}"))?,
-        );
-        tunnel_map.insert(eid, entry.tunnel_port as u16);
-    }
-
-    remote_tunnel_maps.insert(remote, tunnel_map);
-    Ok(())
-}
-
 /// Validates the sender-identity rule for a validated `PeerLeaving` frame.
 /// Returns `Ok(leaving_id)` if `frame.peer_id == remote` (sender is announcing its own departure).
 /// Returns `Err(ForgedSender)` if `frame.peer_id != remote` — no peer should be removed.

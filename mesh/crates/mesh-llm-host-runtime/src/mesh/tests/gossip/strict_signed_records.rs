@@ -102,7 +102,7 @@ async fn compact_gossip_keeps_origin_bytes_and_local_merged_demand() {
             request_count: 3,
         },
     )]);
-    node.merge_remote_demand(&demand);
+    node.merge_remote_demand(&demand).await;
     let record = signed_worker_record(0x61, 1, "signed-model");
     receive(&node, 0x62, Vec::new(), vec![record.clone()]).await;
     let full = node.collect_announcements().await;

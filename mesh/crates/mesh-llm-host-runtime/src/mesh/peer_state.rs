@@ -303,11 +303,14 @@ pub(crate) fn stream_allowed_before_admission(stream_type: u8, trust_policy: Tru
     stream_type == STREAM_ROUTE_REQUEST || stream_type == STREAM_TUNNEL_HTTP
 }
 
-pub(crate) fn ingest_tunnel_map(
+/// Validate a peer's tunnel map and return its target → port entries.
+///
+/// Nothing consumes tunnel maps any more, so the result is not retained:
+/// storing it per sender only grew state that was never read or pruned.
+pub(crate) fn parse_tunnel_map(
     remote: EndpointId,
     frame: &crate::proto::node::TunnelMap,
-    remote_tunnel_maps: &mut HashMap<EndpointId, HashMap<EndpointId, u16>>,
-) -> Result<()> {
+) -> Result<HashMap<EndpointId, u16>> {
     if frame.owner_peer_id.as_slice() != remote.as_bytes() {
         anyhow::bail!(
             "TunnelMap owner_peer_id mismatch: frame claims owner {}, but connected peer is {}",
@@ -339,8 +342,7 @@ pub(crate) fn ingest_tunnel_map(
         tunnel_map.insert(eid, entry.tunnel_port as u16);
     }
 
-    remote_tunnel_maps.insert(remote, tunnel_map);
-    Ok(())
+    Ok(tunnel_map)
 }
 
 /// Validates the sender-identity rule for a validated `PeerLeaving` frame.
@@ -885,6 +887,7 @@ impl Node {
         let state = self.state.lock().await;
         let conn_opt = state.connections.get(&dead_id).cloned();
         let peer = state.peers.get(&dead_id);
+        let target_known = peer.is_some() || conn_opt.is_some();
         let peer_addr = peer.map(|p| p.addr.clone());
         let recently_seen = peer
             .map(|p| p.last_seen.elapsed().as_secs() < PEER_STALE_SECS)
@@ -894,6 +897,7 @@ impl Node {
             .get(&(remote, dead_id))
             .is_some_and(|t| t.elapsed().as_secs() < PEER_DOWN_REPORTER_COOLDOWN_SECS);
         PeerDownReport {
+            target_known,
             conn_opt,
             peer_addr,
             recently_seen,
@@ -907,7 +911,16 @@ impl Node {
         dead_id: EndpointId,
         report: PeerDownReport,
     ) {
-        match peer_down_report_disposition(report.reporter_cooled, report.recently_seen) {
+        match peer_down_report_disposition(
+            report.target_known,
+            report.reporter_cooled,
+            report.recently_seen,
+        ) {
+            PeerDownReportDisposition::IgnoreUnknownPeer => tracing::debug!(
+                "PeerDown: {} reported unknown peer {} dead, ignoring",
+                remote.fmt_short(),
+                dead_id.fmt_short()
+            ),
             PeerDownReportDisposition::SuppressReporterCooldown => tracing::debug!(
                 "PeerDown: {} reported {} dead but reporter is in cooldown, ignoring",
                 remote.fmt_short(),
@@ -1049,11 +1062,7 @@ impl Node {
             .validate_frame()
             .map_err(|e| anyhow::anyhow!("TunnelMap validation failed: {e}"))?;
 
-        let entry_count = frame.entries.len();
-        {
-            let mut state = self.state.lock().await;
-            ingest_tunnel_map(remote, &frame, &mut state.remote_tunnel_maps)?;
-        }
+        let entry_count = parse_tunnel_map(remote, &frame)?.len();
 
         tracing::info!(
             "Received tunnel map from {} ({} entries)",

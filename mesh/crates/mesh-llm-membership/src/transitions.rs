@@ -29,6 +29,12 @@ pub enum TransitivePeerUpdate {
     },
 }
 
+/// Most peers this node holds that it only knows through bridges. A gossip
+/// frame is limited only by its byte size, so without a ceiling one peer could
+/// relay any number of made-up transitive peers into the table. Sized to the
+/// other per-mesh peer ceilings (gossip cursors, signed-record senders).
+pub const MAX_TRANSITIVE_PEERS: usize = 2048;
+
 /// Whether a bridge may rewrite what this node already learned directly.
 ///
 /// A bridge speaks for itself; it does not speak for a peer that has already
@@ -50,6 +56,14 @@ impl MembershipState {
         self.peers
             .values()
             .filter(|peer| peer.is_admitted())
+            .count()
+    }
+
+    /// Peers known only through bridges, never directly admitted.
+    pub fn transitive_peer_count(&self) -> usize {
+        self.peers
+            .values()
+            .filter(|peer| !peer.is_admitted())
             .count()
     }
 
@@ -149,6 +163,8 @@ impl MembershipState {
                 changed,
                 admitted_count: serving_changed.then(|| self.admitted_peer_count()),
             }
+        } else if self.transitive_peer_count() >= MAX_TRANSITIVE_PEERS {
+            TransitivePeerUpdate::Ignored
         } else {
             let mut peer = PeerInfo::from_announcement(id, addr.clone(), ann, owner_summary);
             // Capability provenance must be direct: a bridge cannot grant eligibility.

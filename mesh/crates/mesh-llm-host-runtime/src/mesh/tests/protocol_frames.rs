@@ -196,25 +196,113 @@ fn peer_down_ignored_when_recently_seen_direct() {
 #[test]
 fn peer_down_reporter_cooldown_suppresses_probe_before_recently_seen_check() {
     assert_eq!(
-        peer_down_report_disposition(true, false),
+        peer_down_report_disposition(true, true, false),
         PeerDownReportDisposition::SuppressReporterCooldown,
         "cooldown must suppress repeated false reports even for stale/not-recently-seen peers"
     );
     assert_eq!(
-        peer_down_report_disposition(true, true),
+        peer_down_report_disposition(true, true, true),
         PeerDownReportDisposition::SuppressReporterCooldown,
         "cooldown remains the cheapest rejection path when direct proof-of-life also exists"
     );
     assert_eq!(
-        peer_down_report_disposition(false, true),
+        peer_down_report_disposition(true, false, true),
         PeerDownReportDisposition::RejectRecentlySeen,
         "recent direct gossip should reject first-time false reports without probing"
     );
     assert_eq!(
-        peer_down_report_disposition(false, false),
+        peer_down_report_disposition(true, false, false),
         PeerDownReportDisposition::ProbeReachability,
         "only uncooldowned stale reports should trigger open_bi/connect_mesh probing"
     );
+}
+
+#[test]
+fn peer_down_for_unknown_target_is_ignored_before_other_checks() {
+    for (reporter_cooled, recently_seen) in [(false, false), (true, false), (false, true)] {
+        assert_eq!(
+            peer_down_report_disposition(false, reporter_cooled, recently_seen),
+            PeerDownReportDisposition::IgnoreUnknownPeer,
+        );
+    }
+}
+
+/// A PeerDown naming an id this node never knew must not quarantine it:
+/// otherwise any peer can grow `dead_peers` with made-up ids.
+#[tokio::test]
+async fn peer_down_for_unknown_id_leaves_no_state() {
+    let node = make_test_node(super::NodeRole::Worker)
+        .await
+        .expect("test node must start");
+    let reporter = EndpointId::from(SecretKey::from_bytes(&[0xD0; 32]).public());
+    let unknown = EndpointId::from(SecretKey::from_bytes(&[0xD1; 32]).public());
+
+    let report = node.peer_down_report(reporter, unknown).await;
+    assert!(!report.target_known);
+    node.apply_peer_down_report(reporter, unknown, report).await;
+
+    let state = node.state.lock().await;
+    assert!(state.dead_peers.is_empty());
+    assert!(state.departed_peers.is_empty());
+    assert!(state.peer_down_rejections.is_empty());
+}
+
+/// Gossip merges keep the larger request count, so a peer can hand us
+/// `u64::MAX`; the next local request must not overflow.
+#[tokio::test]
+async fn record_request_saturates_a_gossiped_maximum_count() {
+    let node = make_test_node(super::NodeRole::Worker)
+        .await
+        .expect("test node must start");
+    let model = "Qwen3-8B-Q4_K_M";
+    let theirs = HashMap::from([(
+        canonical_demand_model_ref(model),
+        ModelDemand {
+            last_active: 0,
+            request_count: u64::MAX,
+        },
+    )]);
+    node.merge_remote_demand(&theirs).await;
+
+    node.record_request(model);
+
+    let demand = node.get_demand();
+    assert_eq!(
+        demand[&canonical_demand_model_ref(model)].request_count,
+        u64::MAX
+    );
+}
+
+/// A full demand map makes room by evicting its stalest entry, but never a
+/// pinned one: `active_demand` reports pinned models only while they have an
+/// entry.
+#[tokio::test]
+async fn remote_demand_flood_does_not_evict_pinned_models() {
+    let node = make_test_node(super::NodeRole::Worker)
+        .await
+        .expect("test node must start");
+    node.set_requested_models(vec!["Qwen3-8B-Q4_K_M".to_string()])
+        .await;
+    let pinned = canonical_demand_model_ref("Qwen3-8B-Q4_K_M");
+    let fresher = now_secs() + 60;
+    let flood: HashMap<String, ModelDemand> = (0..mesh_llm_types::mesh::MAX_DEMAND_ENTRIES)
+        .map(|i| {
+            (
+                format!("planted-{i}"),
+                ModelDemand {
+                    last_active: fresher,
+                    request_count: 1,
+                },
+            )
+        })
+        .collect();
+
+    node.merge_remote_demand(&flood).await;
+
+    let demand = node.get_demand();
+    assert_eq!(demand.len(), mesh_llm_types::mesh::MAX_DEMAND_ENTRIES);
+    assert!(demand.contains_key(&pinned));
+    assert!(node.active_demand().await.contains_key(&pinned));
 }
 
 /// PeerDown for a peer whose last_seen is stale and has no connection

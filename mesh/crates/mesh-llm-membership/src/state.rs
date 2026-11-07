@@ -13,8 +13,6 @@ pub struct MembershipState {
     pub connections: HashMap<EndpointId, Connection>,
     pub pending_connections: HashMap<EndpointId, PendingConnectionHandshake>,
     pub next_pending_connection_attempt: u64,
-    /// Remote peers' tunnel maps: peer_endpoint_id → { target_endpoint_id → tunnel_port_on_that_peer }
-    pub remote_tunnel_maps: HashMap<EndpointId, HashMap<EndpointId, u16>>,
     /// Peers confirmed dead — don't reconnect from gossip discovery.
     /// Cleared when the peer successfully reconnects via rejoin/join.
     /// Entries expire after [`crate::peer_state::DEAD_PEER_TTL`] so that reconnection attempts
@@ -59,7 +57,6 @@ impl Default for MembershipState {
             connections: HashMap::new(),
             pending_connections: HashMap::new(),
             next_pending_connection_attempt: 1,
-            remote_tunnel_maps: HashMap::new(),
             dead_peers: HashMap::new(),
             departed_peers: HashMap::new(),
             peer_down_rejections: HashMap::new(),

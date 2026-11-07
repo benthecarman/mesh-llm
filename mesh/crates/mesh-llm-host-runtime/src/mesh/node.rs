@@ -1,6 +1,6 @@
 use super::*;
 use mesh_llm_membership::adopted_membership::RequirementAwareMeshState;
-use mesh_llm_types::mesh::{DEMAND_TTL_SECS, merge_demand};
+use mesh_llm_types::mesh::{DEMAND_TTL_SECS, merge_demand_at};
 use serde_json::json;
 use std::net::SocketAddr;
 
@@ -272,6 +272,8 @@ pub(crate) struct LocalRequestMetricsWindow {
 }
 
 pub(crate) struct PeerDownReport {
+    /// The target is in the peer table or has a live connection.
+    pub(crate) target_known: bool,
     pub(crate) conn_opt: Option<Connection>,
     pub(crate) peer_addr: Option<EndpointAddr>,
     pub(crate) recently_seen: bool,

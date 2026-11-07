@@ -13,13 +13,15 @@ async fn strict_policy_is_adopted_and_two_servers_relay_models_and_demand() -> R
     install_requirement_policy(&origin, &policy).await?;
     origin.set_serving_models(vec!["origin-model".into()]).await;
     relay.set_serving_models(vec!["relay-model".into()]).await;
-    origin.merge_remote_demand(&HashMap::from([(
-        "requested-model".into(),
-        ModelDemand {
-            last_active: now_secs(),
-            request_count: 4,
-        },
-    )]));
+    origin
+        .merge_remote_demand(&HashMap::from([(
+            "requested-model".into(),
+            ModelDemand {
+                last_active: now_secs(),
+                request_count: 4,
+            },
+        )]))
+        .await;
     for node in [&origin, &relay, &observer] {
         node.start_accepting();
     }

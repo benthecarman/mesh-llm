@@ -14,7 +14,7 @@ impl Node {
         let mut demand = self.model_demand.lock().unwrap();
         let entry = demand.entry(model_ref).or_default();
         entry.last_active = now_secs();
-        entry.request_count += 1;
+        entry.request_count = entry.request_count.saturating_add(1);
     }
 
     /// Get the current demand map (for gossip and assignment decisions).
@@ -22,10 +22,15 @@ impl Node {
         self.model_demand.lock().unwrap().clone()
     }
 
-    /// Merge incoming demand from gossip into our local map.
-    pub fn merge_remote_demand(&self, remote: &HashMap<String, ModelDemand>) {
+    /// Merge incoming demand from gossip into our local map. Models pinned
+    /// by this node or a live peer are never evicted to make room, because
+    /// `active_demand` only reports pinned models that still have an entry.
+    pub async fn merge_remote_demand(&self, remote: &HashMap<String, ModelDemand>) {
+        let pinned = self.pinned_requested_models().await;
         let mut demand = self.model_demand.lock().unwrap();
-        merge_demand(&mut demand, remote);
+        merge_demand_at(&mut demand, remote, now_secs(), |model| {
+            pinned.contains(model)
+        });
     }
 
     /// Remove demand entries that have expired (past TTL and not pinned).

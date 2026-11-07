@@ -240,13 +240,8 @@ impl Node {
                 )
                 .await
             {
-                if let Some(ref their_id) = ann.mesh_id {
-                    self.set_mesh_id(their_id.clone()).await;
-                }
-                self.merge_remote_demand(&ann.model_demand);
-                if let Some(rtt_ms) = context.rtt_ms {
-                    self.update_peer_rtt(remote, rtt_ms).await;
-                }
+                self.adopt_admitted_direct_announcement(remote, ann, context.rtt_ms)
+                    .await;
             }
             return Ok(());
         }
@@ -264,6 +259,23 @@ impl Node {
         self.update_transitive_peer(peer_id, addr, ann, remote)
             .await;
         Ok(())
+    }
+
+    /// Take the mesh id, demand and path RTT from a direct peer whose
+    /// announcement was just admitted.
+    async fn adopt_admitted_direct_announcement(
+        &self,
+        remote: EndpointId,
+        ann: &PeerAnnouncement,
+        rtt_ms: Option<u32>,
+    ) {
+        if let Some(ref their_id) = ann.mesh_id {
+            self.set_mesh_id(their_id.clone()).await;
+        }
+        self.merge_remote_demand(&ann.model_demand).await;
+        if let Some(rtt_ms) = rtt_ms {
+            self.update_peer_rtt(remote, rtt_ms).await;
+        }
     }
 
     pub(crate) async fn apply_announced_peers(

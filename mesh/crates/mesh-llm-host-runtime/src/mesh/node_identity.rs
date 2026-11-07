@@ -403,7 +403,7 @@ impl Node {
                 if let Some(ref their_id) = ann.mesh_id {
                     self.set_mesh_id(their_id.clone()).await;
                 }
-                self.merge_remote_demand(&ann.model_demand);
+                self.merge_remote_demand(&ann.model_demand).await;
                 self.add_peer(
                     remote_id,
                     ann.addr.clone(),
