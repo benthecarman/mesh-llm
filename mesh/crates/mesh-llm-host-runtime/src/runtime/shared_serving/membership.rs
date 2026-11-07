@@ -12,7 +12,8 @@ use tokio::sync::watch;
 use crate::inference::election::{InferenceTarget, ModelTargets};
 use crate::mesh::{
     Node, NodeRole, NodeStartupSpec, QuicBindSelection, RelayConfig, RelayPolicy,
-    ScopedNodeIdentity, ServedModelDescriptor,
+    ScopedNodeIdentity, ServedModelDescriptor, TRUST_STORE_RELOAD_INTERVAL, TrustStoreReload,
+    TrustStoreSource,
 };
 use crate::network::tunnel::start_serving_attachment;
 
@@ -138,7 +139,14 @@ impl Membership {
             inputs.ingress_slots,
             inputs.ingress_capacity,
         );
-        let maintenance = membership_maintenance(node.clone());
+        let maintenance = membership_maintenance(
+            node.clone(),
+            inputs
+                .config
+                .trust_store
+                .clone()
+                .map(TrustStoreSource::required_file),
+        );
         let attachment = Self {
             node,
             member,
@@ -239,15 +247,36 @@ impl Drop for Membership {
     }
 }
 
-/// Run peer heartbeats without installing model election or control loops.
-fn membership_maintenance(node: Node) -> tokio::task::JoinHandle<()> {
+/// Run peer heartbeats without installing model election or control loops,
+/// and pick up edits to this membership's explicit trust store.
+fn membership_maintenance(
+    node: Node,
+    trust_store: Option<TrustStoreSource>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut failures = HashMap::new();
+        let mut heartbeat = maintenance_interval(Duration::from_secs(30));
+        let mut reload_tick = maintenance_interval(TRUST_STORE_RELOAD_INTERVAL);
+        let mut reload = trust_store.map(TrustStoreReload::new);
         loop {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            node.run_heartbeat_cycle(&mut failures).await;
+            tokio::select! {
+                _ = heartbeat.tick() => node.run_heartbeat_cycle(&mut failures).await,
+                _ = reload_tick.tick(), if reload.is_some() => {
+                    if let Some(reload) = reload.as_mut() {
+                        reload.reload_into(&node).await;
+                    }
+                }
+            }
         }
     })
+}
+
+/// An interval whose first tick is one `period` away, skipping ticks missed
+/// while the other maintenance step ran.
+fn maintenance_interval(period: Duration) -> tokio::time::Interval {
+    let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval
 }
 
 /// Load this membership's explicit trust store and optional owner key.

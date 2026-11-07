@@ -5,7 +5,7 @@ use super::{
 use crate::MeshRequirements;
 use crate::crypto::{
     OwnerKeychainLoadError, default_keystore_path, default_trust_store_path, keystore_exists,
-    keystore_metadata, load_keystore, load_owner_keypair_from_keychain, load_trust_store,
+    keystore_metadata, load_keystore, load_owner_keypair_from_keychain,
 };
 use crate::inference::{election, skippy};
 use crate::mesh;
@@ -151,15 +151,40 @@ pub(super) fn load_owner_keypair_for_runtime(path: &Path) -> Result<crate::crypt
         .with_context(|| format!("Failed to load owner keystore {}", path.display()))
 }
 
+/// The default trust store plus `--trust-owner`, read at startup and again
+/// while the node runs.
+pub(super) fn runtime_trust_store_source(
+    options: &RuntimeOptions,
+) -> Result<mesh::TrustStoreSource> {
+    Ok(mesh::TrustStoreSource::optional_file(
+        default_trust_store_path()?,
+        options.trust_owner.clone(),
+    ))
+}
+
+/// An owner ID that is not 32 bytes of hex can never match a certificate, so
+/// trusting it admits nobody. Startup keeps going, as the SDK's admission list
+/// accepts any string, but says so instead of failing silently.
+fn warn_about_malformed_trusted_owners(trusted_owners: &[String]) {
+    for owner_id in trusted_owners {
+        if let Err(error) = mesh_llm_identity::OwnerId::parse(owner_id) {
+            let _ = emit_event(OutputEvent::Warning {
+                message: format!(
+                    "--trust-owner {owner_id:?} will never match a node certificate: {error}"
+                ),
+                context: None,
+            });
+        }
+    }
+}
+
 pub(super) fn owner_runtime_config(
     options: &RuntimeOptions,
     config: &plugin::MeshConfig,
 ) -> Result<mesh::OwnerRuntimeConfig> {
-    let trust_store_path = default_trust_store_path()?;
-    let trust_store = load_trust_store(&trust_store_path)
-        .with_context(|| format!("Failed to load trust store {}", trust_store_path.display()))?
-        .merged_with_trusted_owners(&options.trust_owner);
+    let trust_store = runtime_trust_store_source(options)?.load()?;
     let trust_policy = options.trust_policy.unwrap_or(trust_store.policy);
+    warn_about_malformed_trusted_owners(&options.trust_owner);
 
     let keypair = match resolve_runtime_owner_key_path(options)? {
         Some(path) => match load_owner_keypair_for_runtime(&path) {

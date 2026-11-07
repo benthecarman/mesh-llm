@@ -24,7 +24,7 @@ pub use keychain::{
     owner_account_for_path as owner_keychain_account_for_path, save_keystore_with_keychain,
     set_secret as keychain_set,
 };
-pub use keys::{OwnerKeypair, owner_id_from_verifying_key};
+pub use keys::{OwnerId, OwnerKeypair, owner_id_from_verifying_key};
 #[cfg(feature = "host-io")]
 pub use keystore::{
     KeystoreInfo, default_keystore_path, keystore_exists, keystore_metadata, load_keystore,
@@ -37,9 +37,9 @@ pub use node_key::{
 };
 #[cfg(feature = "host-io")]
 pub use ownership::{
-    DEFAULT_NODE_CERT_LIFETIME_SECS, DEFAULT_NODE_CERT_RENEW_WINDOW_SECS, NodeOwnershipClaim,
-    OwnershipStatus, OwnershipSummary, SignedNodeOwnership, TrustPolicy, TrustStore,
-    certificate_needs_renewal, default_node_ownership_path, default_trust_store_path,
+    DEFAULT_NODE_CERT_LIFETIME_SECS, DEFAULT_NODE_CERT_RENEW_WINDOW_SECS, NodeCertId,
+    NodeOwnershipClaim, OwnershipStatus, OwnershipSummary, SignedNodeOwnership, TrustPolicy,
+    TrustStore, certificate_needs_renewal, default_node_ownership_path, default_trust_store_path,
     load_node_ownership, load_trust_store, save_node_ownership, save_trust_store,
     sign_node_ownership, verify_node_ownership,
 };

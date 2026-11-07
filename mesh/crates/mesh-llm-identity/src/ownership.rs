@@ -2,14 +2,53 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::keys::parse_hex_identifier;
 use super::keystore::write_keystore_bytes_atomically;
-use super::{CryptoError, OwnerKeypair, owner_id_from_verifying_key};
+use super::{CryptoError, OwnerId, OwnerKeypair, owner_id_from_verifying_key};
 
 pub const NODE_OWNERSHIP_VERSION: u32 = 1;
 pub const TRUST_STORE_VERSION: u32 = 1;
 pub const DEFAULT_NODE_CERT_LIFETIME_SECS: u64 = 7 * 24 * 60 * 60;
 pub const DEFAULT_NODE_CERT_RENEW_WINDOW_SECS: u64 = 36 * 60 * 60;
 const SIGNING_DOMAIN_TAG: &[u8] = b"mesh-llm-node-ownership-v1:";
+const NODE_CERT_ID_BYTES: usize = 16;
+
+/// The canonical form of a node certificate ID: 32 lowercase hex characters,
+/// as `sign_node_ownership` issues them. Parsing a typed ID into this form
+/// keeps a revocation from being stored in a shape that never matches.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NodeCertId(String);
+
+impl NodeCertId {
+    pub fn parse(value: &str) -> Result<Self, CryptoError> {
+        parse_hex_identifier("certificate ID", value, NODE_CERT_ID_BYTES).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for NodeCertId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::str::FromStr for NodeCertId {
+    type Err = CryptoError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+/// Whether a stored trust-store entry names the same identifier as `value`.
+/// Entries written before IDs were normalized may differ in case or carry
+/// whitespace, and they must still match.
+fn identifiers_match(entry: &str, value: &str) -> bool {
+    entry.trim().eq_ignore_ascii_case(value.trim())
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -377,38 +416,23 @@ pub fn verify_node_ownership(
         return summary;
     }
 
-    if trust_store
-        .revoked_owners
-        .iter()
-        .any(|entry| entry.owner_id == ownership.claim.owner_id)
-    {
+    if trust_store.owner_is_revoked(&ownership.claim.owner_id) {
         summary.status = OwnershipStatus::RevokedOwner;
         return summary;
     }
 
-    if trust_store
-        .revoked_node_certs
-        .iter()
-        .any(|entry| entry.cert_id == ownership.claim.cert_id)
-    {
+    if trust_store.cert_is_revoked(&ownership.claim.cert_id) {
         summary.status = OwnershipStatus::RevokedCert;
         return summary;
     }
 
-    if trust_store.revoked_node_ids.iter().any(|entry| {
-        entry
-            .node_endpoint_id
-            .eq_ignore_ascii_case(&ownership.claim.node_endpoint_id)
-    }) {
+    if trust_store.node_id_is_revoked(&ownership.claim.node_endpoint_id) {
         summary.status = OwnershipStatus::RevokedNodeId;
         return summary;
     }
 
     if matches!(policy, TrustPolicy::Allowlist)
-        && !trust_store
-            .trusted_owners
-            .iter()
-            .any(|entry| entry.owner_id == ownership.claim.owner_id)
+        && !trust_store.trusts_owner(&ownership.claim.owner_id)
     {
         summary.status = OwnershipStatus::UntrustedOwner;
         return summary;
@@ -427,11 +451,40 @@ impl TrustStore {
         self
     }
 
+    /// Whether `owner_id` is on the allowlist.
+    pub fn trusts_owner(&self, owner_id: &str) -> bool {
+        self.trusted_owners
+            .iter()
+            .any(|entry| identifiers_match(&entry.owner_id, owner_id))
+    }
+
+    pub fn owner_is_revoked(&self, owner_id: &str) -> bool {
+        self.revoked_owners
+            .iter()
+            .any(|entry| identifiers_match(&entry.owner_id, owner_id))
+    }
+
+    pub fn cert_is_revoked(&self, cert_id: &str) -> bool {
+        self.revoked_node_certs
+            .iter()
+            .any(|entry| identifiers_match(&entry.cert_id, cert_id))
+    }
+
+    pub fn node_id_is_revoked(&self, node_endpoint_id: &str) -> bool {
+        self.revoked_node_ids
+            .iter()
+            .any(|entry| identifiers_match(&entry.node_endpoint_id, node_endpoint_id))
+    }
+
+    /// Adds an owner to the allowlist, stored trimmed and lowercased. Callers
+    /// that take an ID from a person should parse it with [`OwnerId::parse`]
+    /// first, so a malformed one is refused instead of trusting nobody.
     pub fn add_trusted_owner(&mut self, owner_id: String, label: Option<String>) {
+        let owner_id = owner_id.trim().to_ascii_lowercase();
         if let Some(existing) = self
             .trusted_owners
             .iter_mut()
-            .find(|entry| entry.owner_id == owner_id)
+            .find(|entry| identifiers_match(&entry.owner_id, &owner_id))
         {
             if label.is_some() {
                 existing.label = label;
@@ -446,43 +499,36 @@ impl TrustStore {
     pub fn remove_trusted_owner(&mut self, owner_id: &str) -> bool {
         let before = self.trusted_owners.len();
         self.trusted_owners
-            .retain(|entry| entry.owner_id != owner_id);
+            .retain(|entry| !identifiers_match(&entry.owner_id, owner_id));
         before != self.trusted_owners.len()
     }
 
-    pub fn revoke_owner(&mut self, owner_id: String, reason: Option<String>) {
-        if self
-            .revoked_owners
-            .iter()
-            .any(|entry| entry.owner_id == owner_id)
-        {
+    pub fn revoke_owner(&mut self, owner_id: &OwnerId, reason: Option<String>) {
+        if self.owner_is_revoked(owner_id.as_str()) {
             return;
         }
-        self.revoked_owners.push(RevokedOwner { owner_id, reason });
+        self.revoked_owners.push(RevokedOwner {
+            owner_id: owner_id.to_string(),
+            reason,
+        });
         self.revoked_owners
             .sort_by(|a, b| a.owner_id.cmp(&b.owner_id));
     }
 
-    pub fn revoke_node_cert(&mut self, cert_id: String, reason: Option<String>) {
-        if self
-            .revoked_node_certs
-            .iter()
-            .any(|entry| entry.cert_id == cert_id)
-        {
+    pub fn revoke_node_cert(&mut self, cert_id: &NodeCertId, reason: Option<String>) {
+        if self.cert_is_revoked(cert_id.as_str()) {
             return;
         }
-        self.revoked_node_certs
-            .push(RevokedNodeCert { cert_id, reason });
+        self.revoked_node_certs.push(RevokedNodeCert {
+            cert_id: cert_id.to_string(),
+            reason,
+        });
         self.revoked_node_certs
             .sort_by(|a, b| a.cert_id.cmp(&b.cert_id));
     }
 
     pub fn revoke_node_id(&mut self, node_endpoint_id: String, reason: Option<String>) {
-        if self.revoked_node_ids.iter().any(|entry| {
-            entry
-                .node_endpoint_id
-                .eq_ignore_ascii_case(&node_endpoint_id)
-        }) {
+        if self.node_id_is_revoked(&node_endpoint_id) {
             return;
         }
         self.revoked_node_ids.push(RevokedNodeId {
@@ -563,7 +609,10 @@ mod tests {
         )
         .unwrap();
         let mut trust_store = TrustStore::default();
-        trust_store.revoke_owner(owner.owner_id(), Some("compromised".into()));
+        trust_store.revoke_owner(
+            &OwnerId::parse(&owner.owner_id()).unwrap(),
+            Some("compromised".into()),
+        );
 
         let summary = verify_node_ownership(
             Some(&ownership),
@@ -574,6 +623,134 @@ mod tests {
         );
 
         assert_eq!(summary.status, OwnershipStatus::RevokedOwner);
+    }
+
+    fn signed_test_ownership(owner: &OwnerKeypair) -> SignedNodeOwnership {
+        sign_node_ownership(
+            owner,
+            &[0x42; 32],
+            current_time_unix_ms() + 60_000,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn status_with(store: &TrustStore, ownership: &SignedNodeOwnership) -> OwnershipStatus {
+        verify_node_ownership(
+            Some(ownership),
+            &[0x42; 32],
+            store,
+            TrustPolicy::Off,
+            current_time_unix_ms(),
+        )
+        .status
+    }
+
+    #[test]
+    fn owner_revoked_with_uppercase_id_is_rejected() {
+        let owner = OwnerKeypair::generate();
+        let ownership = signed_test_ownership(&owner);
+        let mut store = TrustStore::default();
+        let typed = OwnerId::parse(&owner.owner_id().to_ascii_uppercase()).unwrap();
+        store.revoke_owner(&typed, None);
+
+        assert_eq!(store.revoked_owners[0].owner_id, owner.owner_id());
+        assert_eq!(
+            status_with(&store, &ownership),
+            OwnershipStatus::RevokedOwner
+        );
+    }
+
+    #[test]
+    fn cert_revoked_with_uppercase_id_is_rejected() {
+        let owner = OwnerKeypair::generate();
+        let ownership = signed_test_ownership(&owner);
+        let mut store = TrustStore::default();
+        let typed = NodeCertId::parse(&format!(
+            " {} ",
+            ownership.claim.cert_id.to_ascii_uppercase()
+        ))
+        .unwrap();
+        store.revoke_node_cert(&typed, None);
+
+        assert_eq!(store.revoked_node_certs[0].cert_id, ownership.claim.cert_id);
+        assert_eq!(
+            status_with(&store, &ownership),
+            OwnershipStatus::RevokedCert
+        );
+    }
+
+    #[test]
+    fn previously_stored_uppercase_revocations_still_match() {
+        let owner = OwnerKeypair::generate();
+        let ownership = signed_test_ownership(&owner);
+        let owner_store = TrustStore {
+            revoked_owners: vec![RevokedOwner {
+                owner_id: owner.owner_id().to_ascii_uppercase(),
+                reason: None,
+            }],
+            ..TrustStore::default()
+        };
+        assert_eq!(
+            status_with(&owner_store, &ownership),
+            OwnershipStatus::RevokedOwner
+        );
+
+        let cert_store = TrustStore {
+            revoked_node_certs: vec![RevokedNodeCert {
+                cert_id: ownership.claim.cert_id.to_ascii_uppercase(),
+                reason: None,
+            }],
+            ..TrustStore::default()
+        };
+        assert_eq!(
+            status_with(&cert_store, &ownership),
+            OwnershipStatus::RevokedCert
+        );
+    }
+
+    #[test]
+    fn node_cert_id_parse_rejects_malformed_values() {
+        let owner = OwnerKeypair::generate();
+        let cert_id = signed_test_ownership(&owner).claim.cert_id;
+        for bad in [
+            String::new(),
+            cert_id[..31].to_string(),
+            owner.owner_id(),
+            format!("{}z", &cert_id[..31]),
+        ] {
+            assert!(
+                matches!(
+                    NodeCertId::parse(&bad),
+                    Err(CryptoError::InvalidIdentifier {
+                        kind: "certificate ID",
+                        ..
+                    })
+                ),
+                "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn allowlist_matches_trusted_owner_in_any_case() {
+        let owner = OwnerKeypair::generate();
+        let ownership = signed_test_ownership(&owner);
+        let mut store = TrustStore::default();
+        store.add_trusted_owner(owner.owner_id().to_ascii_uppercase(), None);
+
+        assert_eq!(store.trusted_owners[0].owner_id, owner.owner_id());
+        let summary = verify_node_ownership(
+            Some(&ownership),
+            &[0x42; 32],
+            &store,
+            TrustPolicy::Allowlist,
+            current_time_unix_ms(),
+        );
+        assert_eq!(summary.status, OwnershipStatus::Verified);
+        assert!(store.remove_trusted_owner(&owner.owner_id().to_ascii_uppercase()));
+        assert!(store.trusted_owners.is_empty());
     }
 
     #[test]

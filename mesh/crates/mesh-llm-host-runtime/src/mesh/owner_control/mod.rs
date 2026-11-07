@@ -1,4 +1,4 @@
-use super::{Node, NodeRole, current_time_unix_ms};
+use super::{Node, NodeRole};
 use crate::crypto::verify_control_plane_target_node;
 use crate::mesh::node_requirements::preflight_pushed_config_for_current_node;
 use crate::mesh::owner_control_response;
@@ -15,8 +15,10 @@ use std::sync::Arc;
 
 mod commands;
 mod exchange_grants;
+mod session_auth;
 
 use commands::{OwnedNodeCommand, OwnedNodeCommandDeadline, OwnedNodeCommandExecutionShape};
+pub(crate) use session_auth::{OWNER_CONTROL_WATCH_REAUTH_INTERVAL, OwnerControlSession};
 
 pub(crate) mod plugin_command_approval;
 
@@ -376,20 +378,12 @@ impl Node {
             return Ok(());
         };
 
-        let local_owner = self.owner_summary.lock().await.clone();
-        let trust_store = self.trust_store.lock().await.clone();
-        if let Err(error) = crate::crypto::verify_control_plane_peer_ownership(
-            &local_owner,
-            handshake.ownership.as_ref(),
-            remote.as_bytes(),
-            &trust_store,
-            self.trust_policy,
-            current_time_unix_ms(),
-        ) {
+        let session = OwnerControlSession::new(remote, handshake);
+        if let Err(error) = self.authorize_owner_control_session(&session).await {
             let _ = self
                 .send_owner_control_terminal_envelope(
                     send,
-                    self.owner_control_auth_error_envelope(&error),
+                    self.owner_control_auth_error_envelope(&error, None),
                 )
                 .await;
             return Ok(());
@@ -399,8 +393,14 @@ impl Node {
             let Some(request) = self.read_owner_control_request(send, recv).await? else {
                 break;
             };
+            if !self
+                .reauthorize_owner_control_session(&session, send, request.request_id)
+                .await
+            {
+                break;
+            }
             let execution_shape = self
-                .handle_owner_control_request(remote, send, recv, request)
+                .handle_owner_control_request(&session, send, recv, request)
                 .await?;
             if execution_shape == OwnedNodeCommandExecutionShape::Watch {
                 break;
@@ -509,27 +509,6 @@ impl Node {
         })
         .await
         .map_err(|error| anyhow::anyhow!("inventory reconciliation task failed: {error}"))?
-    }
-
-    pub(crate) fn owner_control_auth_error_envelope(
-        &self,
-        err: &crate::crypto::ControlPlaneAuthError,
-    ) -> crate::proto::node::OwnerControlEnvelope {
-        let code = match err {
-            crate::crypto::ControlPlaneAuthError::MissingRemoteOwnerAttestation
-            | crate::crypto::ControlPlaneAuthError::RemoteOwnershipInvalid { .. } => {
-                crate::proto::node::OwnerControlErrorCode::InvalidHandshake
-            }
-            crate::crypto::ControlPlaneAuthError::TargetNodeMismatch { .. } => {
-                crate::proto::node::OwnerControlErrorCode::TargetNodeMismatch
-            }
-            crate::crypto::ControlPlaneAuthError::MissingLocalOwnerIdentity { .. }
-            | crate::crypto::ControlPlaneAuthError::RemoteOwnerMismatch { .. }
-            | crate::crypto::ControlPlaneAuthError::UnsupportedTrustPolicy { .. } => {
-                crate::proto::node::OwnerControlErrorCode::Unauthorized
-            }
-        };
-        owner_control_error_envelope(code, None, None, err.to_string())
     }
 
     pub(crate) fn verify_owner_control_request_ids(
@@ -692,7 +671,7 @@ impl Node {
         &self,
         send: &mut iroh::endpoint::SendStream,
         recv: &mut iroh::endpoint::RecvStream,
-        remote: EndpointId,
+        session: &OwnerControlSession,
         request_id: u64,
         watch: crate::proto::node::OwnerControlWatchConfigRequest,
     ) -> anyhow::Result<()> {
@@ -700,7 +679,7 @@ impl Node {
         self.send_owner_control_watch_start(send, request_id, watch.include_snapshot)
             .await?;
 
-        self.stream_owner_control_watch_updates(send, recv, remote, request_id, &mut rev_rx)
+        self.stream_owner_control_watch_updates(send, recv, session, request_id, &mut rev_rx)
             .await;
 
         Ok(())
@@ -734,36 +713,62 @@ impl Node {
         &self,
         send: &mut iroh::endpoint::SendStream,
         recv: &mut iroh::endpoint::RecvStream,
-        remote: EndpointId,
+        session: &OwnerControlSession,
         request_id: u64,
         rev_rx: &mut tokio::sync::watch::Receiver<u64>,
     ) {
+        // An open watch outlives the request that started it, so its
+        // requester is checked again on an interval as well.
+        let mut reauthorize = tokio::time::interval_at(
+            tokio::time::Instant::now() + OWNER_CONTROL_WATCH_REAUTH_INTERVAL,
+            OWNER_CONTROL_WATCH_REAUTH_INTERVAL,
+        );
         loop {
-            tokio::select! {
-                changed = rev_rx.changed() => {
-                    if changed.is_err() {
-                        break;
-                    }
-                    let update = self.current_owner_control_update().await;
-                    if self
-                        .send_owner_control_watch_update(send, request_id, update)
+            let keep_open = tokio::select! {
+                _ = reauthorize.tick() => {
+                    self.reauthorize_owner_control_session(session, send, request_id)
                         .await
-                        .is_err()
-                    {
-                        break;
-                    }
+                }
+                changed = rev_rx.changed() => {
+                    changed.is_ok()
+                        && self
+                            .send_authorized_owner_control_watch_update(session, send, request_id)
+                            .await
                 }
                 inbound = read_len_prefixed(recv) => {
                     if inbound.is_ok() {
                         tracing::debug!(
                             "owner-control watch from {} sent unexpected extra frame; closing stream",
-                            remote.fmt_short()
+                            session.remote.fmt_short()
                         );
                     }
-                    break;
+                    false
                 }
+            };
+            if !keep_open {
+                break;
             }
         }
+    }
+
+    /// Sends the current config to a watch whose requester still passes
+    /// authorization. Returns whether the watch stays open.
+    async fn send_authorized_owner_control_watch_update(
+        &self,
+        session: &OwnerControlSession,
+        send: &mut iroh::endpoint::SendStream,
+        request_id: u64,
+    ) -> bool {
+        if !self
+            .reauthorize_owner_control_session(session, send, request_id)
+            .await
+        {
+            return false;
+        }
+        let update = self.current_owner_control_update().await;
+        self.send_owner_control_watch_update(send, request_id, update)
+            .await
+            .is_ok()
     }
 
     pub(crate) async fn handle_owner_control_apply_config(
@@ -975,11 +980,12 @@ impl Node {
 
     pub(crate) async fn handle_owner_control_request(
         &self,
-        remote: EndpointId,
+        session: &OwnerControlSession,
         send: &mut iroh::endpoint::SendStream,
         recv: &mut iroh::endpoint::RecvStream,
         request: crate::proto::node::OwnerControlRequest,
     ) -> anyhow::Result<OwnedNodeCommandExecutionShape> {
+        let remote = session.remote;
         let request_id = request.request_id;
         let Some(command) = OwnedNodeCommand::decode(request) else {
             self.send_owner_control_envelope(
@@ -1055,7 +1061,7 @@ impl Node {
                     request_id,
                     request,
                 } => {
-                    self.handle_owner_control_watch_config(send, recv, remote, request_id, request)
+                    self.handle_owner_control_watch_config(send, recv, session, request_id, request)
                         .await?
                 }
                 OwnedNodeCommand::ApplyConfig {

@@ -151,7 +151,7 @@ fn revoke_node_validates_all_inputs_before_persisting() {
     let before = std::fs::read(&trust_store_path).unwrap();
 
     let result = run_revoke_node(
-        Some("valid-cert".to_owned()),
+        Some(VALID_CERT_ID.to_owned()),
         Some("not-a-node-id".to_owned()),
         Some("compromised".to_owned()),
         Some(trust_store_path.clone()),
@@ -169,7 +169,7 @@ fn revoke_node_save_failure_leaves_blocking_file_unchanged() {
     std::fs::write(&blocking_file, b"not a directory").unwrap();
 
     let result = run_revoke_node(
-        Some("valid-cert".to_owned()),
+        Some(VALID_CERT_ID.to_owned()),
         None,
         Some("compromised".to_owned()),
         Some(blocking_file.join("trust-store.json")),
@@ -177,5 +177,136 @@ fn revoke_node_save_failure_leaves_blocking_file_unchanged() {
 
     assert!(result.is_err());
     assert_eq!(std::fs::read(&blocking_file).unwrap(), b"not a directory");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+const VALID_CERT_ID: &str = "00112233445566778899aabbccddeeff";
+
+fn empty_trust_store_file(label: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = temporary_auth_test_dir(label);
+    let path = dir.join("trust-store.json");
+    save_trust_store(&path, &TrustStore::default()).unwrap();
+    (dir, path)
+}
+
+fn signed_test_certificate(owner: &OwnerKeypair) -> SignedNodeOwnership {
+    sign_node_ownership(owner, &[0x42; 32], now_unix_ms() + 60_000, None, None).unwrap()
+}
+
+#[test]
+fn revoke_owner_typed_in_uppercase_takes_effect() {
+    let (dir, path) = empty_trust_store_file("revoke-owner-case");
+    let owner = OwnerKeypair::generate();
+    let certificate = signed_test_certificate(&owner);
+
+    run_revoke_owner(
+        format!(" {} ", owner.owner_id().to_ascii_uppercase()),
+        None,
+        Some(path.clone()),
+    )
+    .unwrap();
+
+    let store = load_trust_store(&path).unwrap();
+    assert_eq!(store.revoked_owners[0].owner_id, owner.owner_id());
+    let summary = verify_node_ownership(
+        Some(&certificate),
+        &[0x42; 32],
+        &store,
+        TrustPolicy::Off,
+        now_unix_ms(),
+    );
+    assert_eq!(
+        summary.status,
+        mesh_llm_identity::OwnershipStatus::RevokedOwner
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn revoke_owner_rejects_malformed_id_without_writing() {
+    let (dir, path) = empty_trust_store_file("revoke-owner-malformed");
+    let before = std::fs::read(&path).unwrap();
+    let truncated = &OwnerKeypair::generate().owner_id()[..60];
+
+    let error = run_revoke_owner(truncated.to_owned(), None, Some(path.clone())).unwrap_err();
+
+    assert!(format!("{error:#}").contains("Invalid owner ID"));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn revoke_cert_typed_in_uppercase_takes_effect() {
+    let (dir, path) = empty_trust_store_file("revoke-cert-case");
+    let owner = OwnerKeypair::generate();
+    let certificate = signed_test_certificate(&owner);
+
+    run_revoke_node(
+        Some(certificate.claim.cert_id.to_ascii_uppercase()),
+        None,
+        None,
+        Some(path.clone()),
+    )
+    .unwrap();
+
+    let store = load_trust_store(&path).unwrap();
+    assert_eq!(
+        store.revoked_node_certs[0].cert_id,
+        certificate.claim.cert_id
+    );
+    let summary = verify_node_ownership(
+        Some(&certificate),
+        &[0x42; 32],
+        &store,
+        TrustPolicy::Off,
+        now_unix_ms(),
+    );
+    assert_eq!(
+        summary.status,
+        mesh_llm_identity::OwnershipStatus::RevokedCert
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn revoke_node_rejects_malformed_cert_id_without_writing() {
+    let (dir, path) = empty_trust_store_file("revoke-cert-malformed");
+    let before = std::fs::read(&path).unwrap();
+
+    let error = run_revoke_node(
+        Some("valid-cert".to_owned()),
+        None,
+        None,
+        Some(path.clone()),
+    )
+    .unwrap_err();
+
+    assert!(format!("{error:#}").contains("Invalid certificate ID"));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn trust_add_normalizes_and_rejects_malformed_owner_ids() {
+    let (dir, path) = empty_trust_store_file("trust-add");
+    let owner = OwnerKeypair::generate();
+
+    run_trust_command(&TrustCommand::Add {
+        owner_id: owner.owner_id().to_ascii_uppercase(),
+        label: None,
+        trust_store: Some(path.clone()),
+    })
+    .unwrap();
+    let error = run_trust_command(&TrustCommand::Add {
+        owner_id: "owner-a".to_owned(),
+        label: None,
+        trust_store: Some(path.clone()),
+    })
+    .unwrap_err();
+
+    assert!(format!("{error:#}").contains("Invalid owner ID"));
+    let store = load_trust_store(&path).unwrap();
+    assert_eq!(store.trusted_owners.len(), 1);
+    assert_eq!(store.trusted_owners[0].owner_id, owner.owner_id());
     std::fs::remove_dir_all(dir).ok();
 }

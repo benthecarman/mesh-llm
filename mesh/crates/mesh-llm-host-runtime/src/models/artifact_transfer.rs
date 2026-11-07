@@ -96,11 +96,7 @@ pub(crate) fn artifact_transfer_allowed_between(
             let Some(peer_owner_id) = verified_owner_id(peer_owner) else {
                 return false;
             };
-            local_owner_id == peer_owner_id
-                || trust_store
-                    .trusted_owners
-                    .iter()
-                    .any(|entry| entry.owner_id == peer_owner_id)
+            local_owner_id == peer_owner_id || trust_store.trusts_owner(peer_owner_id)
         }
     }
 }

@@ -175,7 +175,10 @@ pub(crate) use node::{
     MembershipEntry, MembershipNodeConfig, PeerDownReport, StartupResolution,
     membership_token_endpoint, peer_down_endpoint_id,
 };
-pub(crate) use node::{NodeStartupSpec, ScopedNodeIdentity};
+pub(crate) use node::{
+    NodeStartupSpec, ScopedNodeIdentity, TRUST_STORE_RELOAD_INTERVAL, TrustStoreReload,
+    TrustStoreSource,
+};
 pub(crate) use peer_state::{
     ClaimedLogHead, ControlListenerLifecycle, DEAD_PEER_TTL, PEER_STALE_SECS, http_routable_models,
     peer_has_observed_liveness, public_model_id_for_routable_model, resolve_peer_leaving,

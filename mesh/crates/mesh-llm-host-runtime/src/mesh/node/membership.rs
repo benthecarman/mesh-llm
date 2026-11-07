@@ -492,6 +492,20 @@ impl Node {
         .merged_with_trusted_owners(trusted_owners)
     }
 
+    /// Carries the node's current revocations into every membership's store,
+    /// keeping each membership's own allowlist, after the node reloads its
+    /// trust store.
+    pub(super) async fn push_revocations_to_memberships(&self) {
+        let node_store = self.trust_store.lock().await.clone();
+        for membership in self.memberships.nodes().await {
+            let mut store = membership.trust_store.lock().await.clone();
+            store.revoked_owners = node_store.revoked_owners.clone();
+            store.revoked_node_certs = node_store.revoked_node_certs.clone();
+            store.revoked_node_ids = node_store.revoked_node_ids.clone();
+            membership.install_trust_store(store).await;
+        }
+    }
+
     /// Binds the membership's endpoint on its previous UDP port when it can.
     async fn bind_membership_endpoint(
         &self,

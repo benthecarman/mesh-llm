@@ -348,3 +348,39 @@ async fn a_membership_refuses_a_peer_announcing_another_mesh() -> Result<()> {
     assert_eq!(newcomer.mesh_id().await, membership.mesh_id().await);
     Ok(())
 }
+
+/// Revoking an owner on the node reaches the meshes it serves: each
+/// membership drops that owner's admitted peers and keeps its own allowlist.
+#[tokio::test]
+async fn a_trust_store_reload_carries_revocations_into_memberships() -> Result<()> {
+    let owner = test_owner_keypair(0x61, 0x62);
+    let member_owner = test_owner_keypair(0x63, 0x64);
+    let node = owned_node(&owner, &[&owner]).await?;
+    let membership = membership_of(&node, &[&member_owner]).await?;
+    let peer_id = SecretKey::generate().public();
+    let attestation = sign_node_ownership(
+        &member_owner,
+        peer_id.as_bytes(),
+        current_time_unix_ms() + DEFAULT_NODE_CERT_LIFETIME_SECS * 1000,
+        None,
+        None,
+    )?;
+    let mut peer = make_test_peer(peer_id, None, 0);
+    peer.owner_attestation = Some(attestation);
+    membership.state.lock().await.peers.insert(peer_id, peer);
+
+    let mut revoked = node.trust_store.lock().await.clone();
+    revoked.revoke_owner(
+        &mesh_llm_identity::OwnerId::parse(&member_owner.owner_id())?,
+        None,
+    );
+    assert!(node.apply_trust_store(revoked).await);
+
+    assert!(!membership.state.lock().await.peers.contains_key(&peer_id));
+    let membership_store = membership.trust_store.lock().await.clone();
+    assert!(membership_store.owner_is_revoked(&member_owner.owner_id()));
+    assert!(membership_store.trusts_owner(&member_owner.owner_id()));
+    assert!(!membership_store.trusts_owner(&owner.owner_id()));
+    node.close_memberships().await;
+    Ok(())
+}

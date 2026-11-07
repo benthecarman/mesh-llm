@@ -24,10 +24,11 @@ use super::{
     record_runtime_operational_event, resolve_runtime_owner_key_path,
     resolve_startup_mesh_creation_state, run_auto_join_mesh_phase,
     run_auto_runtime_loop_and_shutdown, run_local_model_only, runtime_data_producer_for_console,
-    runtime_startup_requirements, setup_run_auto_console_state, setup_run_auto_serving_surface,
-    spawn_embedded_runtime_control_forwarder, spawn_run_auto_additional_model_tasks,
-    spawn_run_auto_discovery_publisher, start_run_auto_bootstrap_proxy, startup_device_override,
-    startup_local_model_loop, swarm_capture_observer_requested,
+    runtime_startup_requirements, runtime_trust_store_source, setup_run_auto_console_state,
+    setup_run_auto_serving_surface, spawn_embedded_runtime_control_forwarder,
+    spawn_run_auto_additional_model_tasks, spawn_run_auto_discovery_publisher,
+    start_run_auto_bootstrap_proxy, startup_device_override, startup_local_model_loop,
+    swarm_capture_observer_requested,
 };
 use crate::api;
 use crate::inference::{election, skippy};
@@ -1149,6 +1150,8 @@ pub(super) async fn build_run_auto_node_setup(
         config.runtime.activity.clone(),
     );
     node.start_heartbeat();
+    // Runs for the life of the process, as the heartbeat does.
+    drop(node.start_trust_store_reload(runtime_trust_store_source(options)?));
     node.start_rtt_refresh();
     // iroh owns NAT traversal and relay-to-direct migration; modern nodes do
     // not start the legacy application-level reverse-dial sender.

@@ -141,7 +141,10 @@ fn public_bundle_distinguishes_missing_unverified_expired_and_revoked() {
         bundle_status(&node, &trust, Some(&certificate), now + 60_000),
         IdentityEvidenceStatus::Expired
     );
-    trust.revoke_node_cert(certificate.claim.cert_id.clone(), None);
+    trust.revoke_node_cert(
+        &mesh_llm_identity::NodeCertId::parse(&certificate.claim.cert_id).unwrap(),
+        None,
+    );
     assert_eq!(
         bundle_status(&node, &trust, Some(&certificate), now),
         IdentityEvidenceStatus::Revoked

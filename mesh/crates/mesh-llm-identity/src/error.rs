@@ -32,6 +32,9 @@ pub enum CryptoError {
     #[error("OS keychain access denied: {reason}")]
     KeychainAccessDenied { reason: String },
 
+    #[error("invalid {kind}: {reason}")]
+    InvalidIdentifier { kind: &'static str, reason: String },
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 

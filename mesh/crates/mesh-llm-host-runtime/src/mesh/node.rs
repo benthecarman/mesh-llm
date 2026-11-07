@@ -10,6 +10,7 @@ mod membership;
 mod ownership;
 mod routing_telemetry;
 mod startup;
+mod trust_store_reload;
 
 pub(crate) use construction::{NodeStartupSpec, ScopedNodeIdentity};
 pub(crate) use membership::{
@@ -21,6 +22,9 @@ pub use startup::detect_local_fit_bytes;
 #[cfg(test)]
 pub(crate) use startup::hardware_snapshot_for_start;
 pub(crate) use startup::{StartupResolution, stamp_plugin_event_source, startup_transport_config};
+pub(crate) use trust_store_reload::{
+    TRUST_STORE_RELOAD_INTERVAL, TrustStoreReload, TrustStoreSource,
+};
 
 /// Upper bound on how long shutdown waits for one iroh endpoint to close.
 ///
