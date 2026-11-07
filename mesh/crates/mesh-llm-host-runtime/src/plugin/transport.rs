@@ -992,6 +992,7 @@ mod tests {
             metadata_json: None,
             expected_bytes: None,
             idle_timeout_ms: None,
+            source_peer_id: String::new(),
         };
 
         let listener = mesh_llm_plugin::bind_side_stream("demo-plugin", &request.stream_id)

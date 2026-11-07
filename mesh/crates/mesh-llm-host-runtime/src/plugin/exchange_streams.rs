@@ -57,6 +57,7 @@ async fn open_body_stream_granted(
                 ),
                 expected_bytes,
                 idle_timeout_ms: Some(30_000),
+                source_peer_id: String::new(),
             },
             declaration,
         ),

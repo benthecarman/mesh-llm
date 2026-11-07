@@ -527,6 +527,7 @@ async fn handle_streamed_http_binding(
         ),
         expected_bytes: Some(forwarded_request.len() as u64),
         idle_timeout_ms: Some(30_000),
+        source_peer_id: String::new(),
     };
     let mut plugin_stream = plugin_manager.connect_stream(plugin_name, request).await?;
     plugin_stream.write_all(&forwarded_request).await?;
@@ -1694,6 +1695,8 @@ mod tests {
             plugin_manager
                 .set_test_stream_handler("demo", move |request| {
                     Box::pin(async move {
+                        // The host opened this stream itself, so no peer is named.
+                        assert!(request.source_peer_id.is_empty());
                         let mut request = request;
                         request.stream_id = "s".into();
                         let listener =

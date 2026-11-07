@@ -126,6 +126,10 @@ pub mod host_capabilities {
     /// `local` to the other local plugins declaring that channel, and to no
     /// peer (see [`crate::manifest::local_channel`]).
     pub const LOCAL_CHANNELS: &str = "local_channels.v1";
+    /// The host sets `OpenStreamRequest.source_peer_id` on a stream a peer
+    /// opened, from the connection the stream arrived on. Without it, an empty
+    /// `source_peer_id` does not mean the host opened the stream.
+    pub const MESH_STREAM_SOURCE_PEER: &str = "mesh_stream_source_peer.v1";
 
     /// Why a plugin with `manifest` cannot run on this host: a capability its
     /// manifest requires that the host does not list.

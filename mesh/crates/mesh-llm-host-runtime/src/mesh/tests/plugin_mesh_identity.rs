@@ -495,3 +495,105 @@ async fn valid_origin_signed_bulk_frame_is_accepted_through_a_relay() {
     assert_eq!(forwarder.plugin_frame_source_mismatch_total(), 0);
     assert_eq!(receiver.plugin_frame_source_mismatch_total(), 0);
 }
+
+/// Answers no plugin RPC: the mesh stream test needs only a manifest and a
+/// stream handler, never a call into the plugin.
+struct PluginMeshStreamTestBridge;
+
+impl plugin::PluginRpcBridge for PluginMeshStreamTestBridge {
+    fn handle_request(
+        &self,
+        _plugin_name: String,
+        _method: String,
+        _params_json: String,
+    ) -> plugin::BridgeFuture<Result<plugin::RpcResult, crate::plugin::proto::ErrorResponse>> {
+        Box::pin(async {
+            Err(crate::plugin::proto::ErrorResponse {
+                code: rmcp::model::ErrorCode::INTERNAL_ERROR.0,
+                message: "unexpected request".into(),
+                data_json: String::new(),
+            })
+        })
+    }
+
+    fn handle_notification(
+        &self,
+        _plugin_name: String,
+        _method: String,
+        _params_json: String,
+    ) -> plugin::BridgeFuture<()> {
+        Box::pin(async {})
+    }
+}
+
+/// Load a test plugin on `receiver` that declares mesh channel `channel` and
+/// reports every stream the host opens to it, without accepting any.
+#[cfg(unix)]
+async fn capture_plugin_streams(
+    receiver: &Node,
+    plugin_id: &str,
+    channel: &str,
+) -> mpsc::UnboundedReceiver<crate::plugin::proto::OpenStreamRequest> {
+    let plugin_manager = plugin::PluginManager::for_test_bridge(
+        &[plugin_id],
+        Arc::new(PluginMeshStreamTestBridge),
+    );
+    plugin_manager
+        .set_test_manifests(std::collections::BTreeMap::from([(
+            plugin_id.to_string(),
+            crate::plugin::proto::PluginManifest {
+                mesh_channels: vec![crate::plugin::proto::MeshChannelManifest {
+                    name: channel.to_string(),
+                    local: false,
+                }],
+                ..Default::default()
+            },
+        )]))
+        .await;
+    let (opened_tx, opened_rx) = mpsc::unbounded_channel();
+    plugin_manager
+        .set_test_stream_handler(plugin_id, move |request| {
+            let _ = opened_tx.send(request);
+            Box::pin(async { anyhow::bail!("the test plugin only records stream requests") })
+        })
+        .await;
+    receiver.set_plugin_manager(plugin_manager).await;
+    opened_rx
+}
+
+/// A plugin receiving a mesh stream learns which peer opened it, taken from the
+/// authenticated connection the stream arrived on.
+#[cfg(unix)]
+#[tokio::test]
+async fn inbound_plugin_mesh_stream_names_its_authenticated_sender() {
+    let (sender, receiver) = connect_plugin_identity_pair().await;
+    let mut opened = capture_plugin_streams(&receiver, "streamer", "files").await;
+
+    let request = crate::plugin::proto::OpenMeshStreamRequest {
+        stream_id: "inbound-stream".to_string(),
+        target_peer_id: peer_hex(&receiver),
+        plugin_id: "streamer".to_string(),
+        channel: "files".to_string(),
+        bidirectional: true,
+        ..Default::default()
+    };
+    write_plugin_frame(
+        &sender,
+        receiver.id(),
+        STREAM_PLUGIN_MESH_STREAM,
+        &request.encode_to_vec(),
+    )
+    .await;
+
+    let opened = tokio::time::timeout(std::time::Duration::from_secs(10), opened.recv())
+        .await
+        .expect("the receiver opens a local stream to the plugin")
+        .expect("the stream request reaches the test plugin");
+    assert_eq!(opened.stream_id, "inbound-stream");
+    assert!(opened.bidirectional);
+    assert_eq!(
+        opened.source_peer_id,
+        peer_hex(&sender),
+        "the plugin must be told which authenticated peer opened the mesh stream"
+    );
+}

@@ -24,8 +24,11 @@ pub(crate) fn plugin_mesh_stream_error(
     }
 }
 
+/// The local stream request for a mesh stream `remote` opened. The source peer
+/// comes from the authenticated connection, never from the remote's request.
 pub(crate) fn open_stream_request_from_mesh_request(
     request: &crate::plugin::proto::OpenMeshStreamRequest,
+    remote: EndpointId,
 ) -> crate::plugin::proto::OpenStreamRequest {
     crate::plugin::proto::OpenStreamRequest {
         stream_id: request.stream_id.clone(),
@@ -37,6 +40,7 @@ pub(crate) fn open_stream_request_from_mesh_request(
         metadata_json: request.metadata_json.clone(),
         expected_bytes: request.expected_bytes,
         idle_timeout_ms: request.idle_timeout_ms,
+        source_peer_id: super::endpoint_id_hex(remote),
     }
 }
 
@@ -108,7 +112,7 @@ impl Node {
 
     pub(super) async fn handle_plugin_mesh_stream(
         &self,
-        _remote: iroh::EndpointId,
+        remote: iroh::EndpointId,
         send: SendStream,
         mut recv: RecvStream,
     ) -> Result<()> {
@@ -135,7 +139,7 @@ impl Node {
         let local = plugin_manager
             .connect_stream(
                 &request.plugin_id,
-                open_stream_request_from_mesh_request(&request),
+                open_stream_request_from_mesh_request(&request, remote),
             )
             .await?;
 
@@ -294,5 +298,41 @@ mod tests {
         assert_eq!(endpoint_id_from_hex(&encoded), Some(peer_id));
         assert_eq!(endpoint_id_from_hex("not-hex"), None);
         assert_eq!(endpoint_id_from_hex(&hex::encode([0u8; 16])), None);
+    }
+
+    #[test]
+    fn mesh_stream_request_names_the_connection_peer_as_source() {
+        let remote = EndpointId::from(iroh::SecretKey::from_bytes(&[0x11; 32]).public());
+        let other = EndpointId::from(iroh::SecretKey::from_bytes(&[0x22; 32]).public());
+        let request = crate::plugin::proto::OpenMeshStreamRequest {
+            stream_id: "stream-1".into(),
+            target_peer_id: hex::encode(other.as_bytes()),
+            plugin_id: "plugin".into(),
+            channel: "channel".into(),
+            purpose: crate::plugin::proto::StreamPurpose::BulkTransfer as i32,
+            mode: crate::plugin::proto::StreamMode::RawBytes as i32,
+            bidirectional: true,
+            content_type: Some("application/octet-stream".into()),
+            correlation_id: Some("correlation".into()),
+            metadata_json: Some(format!(
+                r#"{{"source_peer_id":"{}"}}"#,
+                hex::encode(other.as_bytes())
+            )),
+            expected_bytes: Some(42),
+            idle_timeout_ms: Some(1_000),
+        };
+
+        let local = open_stream_request_from_mesh_request(&request, remote);
+
+        assert_eq!(local.source_peer_id, hex::encode(remote.as_bytes()));
+        assert_eq!(local.stream_id, request.stream_id);
+        assert_eq!(local.purpose, request.purpose);
+        assert_eq!(local.mode, request.mode);
+        assert_eq!(local.bidirectional, request.bidirectional);
+        assert_eq!(local.content_type, request.content_type);
+        assert_eq!(local.correlation_id, request.correlation_id);
+        assert_eq!(local.metadata_json, request.metadata_json);
+        assert_eq!(local.expected_bytes, request.expected_bytes);
+        assert_eq!(local.idle_timeout_ms, request.idle_timeout_ms);
     }
 }

@@ -1362,6 +1362,25 @@ would read the declaration as an ordinary mesh channel and send the messages to
 peers, so the plugin runtime refuses to initialize a plugin whose manifest, as
 returned from `initialize`, declares a local channel on such a host.
 
+### Mesh streams
+
+A plugin opens a byte stream to the same plugin on one peer with
+`PluginContext::open_mesh_stream`, naming the peer (`target_peer_id`) and a
+mesh channel both plugins declare. The receiving host hands the stream to its
+plugin as an `OpenStreamRequest` whose `source_peer_id` is the peer that opened
+it, as the lowercase hex of its endpoint id. The host takes that id from the
+authenticated connection the stream arrived on, not from the request, so a peer
+cannot name another peer as the sender. The other fields, such as
+`metadata_json` and `correlation_id`, are what the sending peer put in its
+request, so a plugin reads the sender from `source_peer_id` alone, never from
+them. A stream the host opens itself, such as an HTTP binding body, has an
+empty `source_peer_id`.
+
+The host advertises the `mesh_stream_source_peer.v1` host capability. A host
+without it leaves `source_peer_id` empty on every stream, so a plugin that
+decides what to accept from a peer checks the capability before it reads an
+empty `source_peer_id` as a stream its own host opened.
+
 ## Plugin Keys
 
 A plugin that signs records can have its host announce the public key it signs
