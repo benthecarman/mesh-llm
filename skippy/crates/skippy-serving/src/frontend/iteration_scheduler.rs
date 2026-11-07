@@ -595,6 +595,10 @@ impl IterationScheduler {
         resumed: bool,
     ) -> InferenceResult<ScheduledGenerationStats> {
         let mut first_token_at = None;
+        // The worker does not wait for a token's acknowledgement before
+        // decoding the next one, so tokens can still arrive after the caller
+        // has said Stop. Those tokens are refused rather than delivered.
+        let mut stopped = false;
         loop {
             if cancellation.is_some_and(skippy_inference_api::CancellationToken::is_cancelled) {
                 let _ = self
@@ -604,10 +608,14 @@ impl IterationScheduler {
                 return Err(InferenceError::backend("request cancelled"));
             }
             match events.recv_timeout(CANCELLATION_POLL_INTERVAL) {
+                Ok(SchedulerEvent::Token { ack, .. }) if stopped => {
+                    let _ = ack.send(TokenControl::Stop);
+                }
                 Ok(SchedulerEvent::Token { token, ack }) => {
                     first_token_at.get_or_insert_with(Instant::now);
                     match on_token(token) {
                         Ok(control) => {
+                            stopped = control == TokenControl::Stop;
                             let _ = ack.send(control);
                         }
                         Err(error) => {

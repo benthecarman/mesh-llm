@@ -322,10 +322,16 @@ pub(in crate::frontend) fn generation_event_to_completion_chunk(
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::frontend) enum TokenControl {
     Continue,
     Stop,
+}
+
+/// What a generated token contributes to the response text.
+enum DecodedToken {
+    EndOfGeneration,
+    Piece(Vec<u8>),
 }
 
 /// Whether generation for this request is running under tool-call emulation:
@@ -369,6 +375,9 @@ where
     ignore_eos: bool,
     /// Tokens counted as completion tokens, in order, to align logprobs.
     emitted_tokens: Vec<i32>,
+    /// Set once a token returned `Stop`. Later tokens are refused, so text
+    /// trimmed at a stop sequence cannot come back and counts stay exact.
+    stopped: bool,
 }
 
 impl<'a, F> TextGenerationCollector<'a, F>
@@ -401,6 +410,7 @@ where
             emulation_active: false,
             ignore_eos: false,
             emitted_tokens: Vec::new(),
+            stopped: false,
         })
     }
 
@@ -419,27 +429,56 @@ where
     }
 
     pub(in crate::frontend) fn push_token(&mut self, token: i32) -> InferenceResult<TokenControl> {
+        self.push_decoded_token(token, Self::decode_with_model)
+    }
+
+    /// Applies one generated token. After any token has returned `Stop`, the
+    /// collector refuses further tokens without decoding them: a producer
+    /// that decoded ahead of the stop must not change the text, the streamed
+    /// output, or the completion count.
+    fn push_decoded_token(
+        &mut self,
+        token: i32,
+        decode: impl FnOnce(&mut Self, i32) -> InferenceResult<DecodedToken>,
+    ) -> InferenceResult<TokenControl> {
+        if self.stopped {
+            return Ok(TokenControl::Stop);
+        }
+        let control = match decode(self, token)? {
+            DecodedToken::EndOfGeneration => {
+                self.finish_reason = finish_reason_for_generation(false);
+                TokenControl::Stop
+            }
+            DecodedToken::Piece(piece) => self.push_piece(token, &piece)?,
+        };
+        self.stopped = control == TokenControl::Stop;
+        Ok(control)
+    }
+
+    fn decode_with_model(&mut self, token: i32) -> InferenceResult<DecodedToken> {
         let eog_timer = Instant::now();
-        if !self.ignore_eos
+        let is_eog = !self.ignore_eos
             && self
                 .model
                 .token_is_eog(token)
-                .map_err(openai_backend_error)?
-        {
-            self.metrics.eog_check_ms += eog_timer.elapsed().as_secs_f64() * 1000.0;
-            self.finish_reason = finish_reason_for_generation(false);
-            return Ok(TokenControl::Stop);
-        }
+                .map_err(openai_backend_error)?;
         self.metrics.eog_check_ms += eog_timer.elapsed().as_secs_f64() * 1000.0;
-        self.completion_tokens += 1;
-        self.emitted_tokens.push(token);
+        if is_eog {
+            return Ok(DecodedToken::EndOfGeneration);
+        }
         let detokenize_timer = Instant::now();
         let piece = self
             .model
             .detokenize_bytes(&[token])
             .map_err(openai_backend_error)?;
-        self.generated_text_bytes.extend_from_slice(&piece);
         self.metrics.detokenize_ms += detokenize_timer.elapsed().as_secs_f64() * 1000.0;
+        Ok(DecodedToken::Piece(piece))
+    }
+
+    fn push_piece(&mut self, token: i32, piece: &[u8]) -> InferenceResult<TokenControl> {
+        self.completion_tokens += 1;
+        self.emitted_tokens.push(token);
+        self.generated_text_bytes.extend_from_slice(piece);
         let valid_len = valid_utf8_prefix_len(&self.generated_text_bytes);
         if valid_len > 0 {
             let candidate = std::str::from_utf8(&self.generated_text_bytes[..valid_len])
@@ -596,6 +635,91 @@ mod tests {
             "tools": extra.get("tools"),
         }))
         .expect("valid chat request")
+    }
+
+    fn modelless_collector<F>(
+        stop_values: Vec<&str>,
+        on_text_chunk: F,
+    ) -> TextGenerationCollector<'_, F>
+    where
+        F: FnMut(&str) -> InferenceResult<()>,
+    {
+        let runtime = Arc::new(Mutex::new(RuntimeState::new_modelless_for_test(1)));
+        TextGenerationCollector::new(runtime, stop_values, on_text_chunk).expect("collector")
+    }
+
+    fn piece<C>(text: &'static str) -> impl FnOnce(&mut C, i32) -> InferenceResult<DecodedToken> {
+        move |_, _| Ok(DecodedToken::Piece(text.as_bytes().to_vec()))
+    }
+
+    fn end_of_generation<C>() -> impl FnOnce(&mut C, i32) -> InferenceResult<DecodedToken> {
+        |_, _| Ok(DecodedToken::EndOfGeneration)
+    }
+
+    fn not_decoded<C>() -> impl FnOnce(&mut C, i32) -> InferenceResult<DecodedToken> {
+        |_, token| panic!("token {token} arrived after Stop and must not be decoded")
+    }
+
+    /// A producer that decoded ahead of the stop delivers one more token.
+    /// Without the stop latch the text is rebuilt from the untrimmed bytes,
+    /// the stop sequence moves out of the search window, and "END" is
+    /// streamed to the client.
+    #[test]
+    fn token_after_stop_sequence_does_not_bring_back_trimmed_text() {
+        let chunks = std::cell::RefCell::new(Vec::<String>::new());
+        let mut collector = modelless_collector(vec!["END"], |chunk| {
+            chunks.borrow_mut().push(chunk.to_string());
+            Ok(())
+        });
+
+        assert_eq!(
+            collector.push_decoded_token(1, piece("abc")).unwrap(),
+            TokenControl::Continue
+        );
+        assert_eq!(
+            collector.push_decoded_token(2, piece("END")).unwrap(),
+            TokenControl::Stop
+        );
+        let late = collector.push_decoded_token(3, piece("x")).unwrap();
+        collector.emit_safe_delta(true).unwrap();
+
+        // Without the latch the text becomes "abcENDx" and "ENDx" is streamed.
+        assert_eq!(collector.text, "abc");
+        assert_eq!(chunks.borrow().concat(), "abc");
+        assert_eq!(collector.completion_tokens, 2);
+        assert_eq!(collector.emitted_tokens, vec![1, 2]);
+        assert_eq!(late, TokenControl::Stop);
+    }
+
+    #[test]
+    fn token_after_end_of_generation_is_not_counted_or_streamed() {
+        let chunks = std::cell::RefCell::new(Vec::<String>::new());
+        let mut collector = modelless_collector(Vec::new(), |chunk| {
+            chunks.borrow_mut().push(chunk.to_string());
+            Ok(())
+        });
+
+        assert_eq!(
+            collector.push_decoded_token(1, piece("hi")).unwrap(),
+            TokenControl::Continue
+        );
+        assert_eq!(
+            collector
+                .push_decoded_token(2, end_of_generation())
+                .unwrap(),
+            TokenControl::Stop
+        );
+        assert_eq!(
+            collector.push_decoded_token(3, not_decoded()).unwrap(),
+            TokenControl::Stop
+        );
+        collector.emit_safe_delta(true).unwrap();
+
+        assert_eq!(collector.text, "hi");
+        assert_eq!(chunks.borrow().concat(), "hi");
+        assert_eq!(collector.completion_tokens, 1);
+        assert_eq!(collector.emitted_tokens, vec![1]);
+        assert_eq!(collector.finish_reason, finish_reason_for_generation(false));
     }
 
     #[test]
