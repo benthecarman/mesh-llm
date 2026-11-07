@@ -53,6 +53,11 @@ message StageArtifactTransferResponse {
 }
 
 message LoadStage {
+  // A load names the model and the neighbouring stages by identity, never a
+  // file on the receiving node: it resolves its own model source and
+  // reaches neighbours through the stage transport.
+  reserved 11, 22;
+  reserved "model_path", "projector_path";
   string topology_id = 1;
   string run_id = 2;
   string model_id = 3;
@@ -63,8 +68,10 @@ message LoadStage {
   uint32 stage_index = 8;
   uint32 layer_start = 9;
   uint32 layer_end = 10;
-  optional string model_path = 11;
   optional StageDevice selected_device = 12;
+  // Ignored: the receiver always listens on loopback at an ephemeral port.
+  // Senders set 127.0.0.1:0, here and in every topology entry, because
+  // older receivers require a bind address that matches this stage's entry.
   string bind_addr = 13;
   uint32 ctx_size = 14;
   int32 n_gpu_layers = 15;
@@ -74,7 +81,6 @@ message LoadStage {
   StageLoadMode load_mode = 19;
   optional StagePeer upstream = 20;
   optional StagePeer downstream = 21;
-  optional string projector_path = 22;
   uint32 lane_count = 23;
   optional uint32 n_batch = 24;
   optional uint32 n_ubatch = 25;
@@ -116,15 +122,17 @@ message LoadStage {
 }
 
 message StageDFlashPlan {
+  // The final stage gets its draft from draft_source, as it gets its layers,
+  // never from a path on the planning node.
+  reserved 2;
+  reserved "draft_model_path";
   repeated uint32 target_layers = 1;
-  // Set on the final stage only.
-  optional string draft_model_path = 2;
   optional uint32 max_draft_tokens = 3;
   optional int32 draft_n_gpu_layers = 4;
-  // The pinned default draft (from the package, the pairing index or the
-  // bootstrap table), on the final stage only, which fetches and verifies its
-  // own copy. Unset for a configured draft and from older planners; the stage
-  // then loads draft_model_path as sent.
+  // The pinned draft, on the final stage only, which fetches and verifies its
+  // own copy: a default draft (from the package, the pairing index or the
+  // bootstrap table), or a configured draft from the planner's Hugging Face
+  // cache. Unset when the final stage has no draft to load.
   optional StageDFlashDraftSource draft_source = 5;
   // The configured draft device, on the final stage only. A stage without
   // it places the draft with the target.
@@ -151,6 +159,7 @@ message StageTopologyStage {
   bytes node_id = 3;
   uint32 layer_start = 4;
   uint32 layer_end = 5;
+  // Ignored; senders set 127.0.0.1:0, which older receivers require.
   string bind_addr = 6;
 }
 
@@ -246,6 +255,9 @@ message StageAdmissionAdmitted {
 }
 
 message StageStatus {
+  // Local paths of the reporting node stay on that node.
+  reserved 17, 20, 22;
+  reserved "source_model_path", "materialized_path", "projector_path";
   string topology_id = 1;
   string run_id = 2;
   string model_id = 3;
@@ -255,6 +267,8 @@ message StageStatus {
   uint32 layer_start = 7;
   uint32 layer_end = 8;
   StageRuntimeState state = 9;
+  // The stage server's loopback address on the reporting node. Older
+  // coordinators require a nonzero port on a ready local-source stage.
   string bind_addr = 10;
   optional string error = 11;
   uint64 shutdown_generation = 12;
@@ -262,12 +276,9 @@ message StageStatus {
   uint32 ctx_size = 14;
   optional string package_ref = 15;
   optional string manifest_sha256 = 16;
-  optional string source_model_path = 17;
   optional string source_model_sha256 = 18;
   optional uint64 source_model_bytes = 19;
-  optional string materialized_path = 20;
   optional bool materialized_pinned = 21;
-  optional string projector_path = 22;
   uint32 lane_count = 23;
   optional uint32 n_batch = 24;
   optional uint32 n_ubatch = 25;
@@ -317,6 +328,8 @@ message StageStatusList {
 }
 
 message LayerInventory {
+  reserved 8;
+  reserved "source_model_path";
   string model_id = 1;
   string package_ref = 2;
   string manifest_sha256 = 3;
@@ -324,7 +337,6 @@ message LayerInventory {
   repeated LayerRange ready_ranges = 5;
   repeated LayerRange available_ranges = 6;
   repeated LayerRange missing_ranges = 7;
-  optional string source_model_path = 8;
   optional uint64 source_model_bytes = 9;
   SourceModelKind source_model_kind = 10;
   optional string source_model_sha256 = 11;
@@ -417,9 +429,12 @@ enum StageGlmDsaPolicy {
 }
 
 message StagePeer {
+  // A neighbouring stage is reached through the stage transport to its node,
+  // which the receiver opens; node_id is required.
+  reserved 3;
+  reserved "endpoint";
   string stage_id = 1;
   uint32 stage_index = 2;
-  string endpoint = 3;
   optional bytes node_id = 4;
 }
 

@@ -51,7 +51,7 @@ pub enum StageFrameError {
     MissingRequiredSourceDigest,
     LocalSourcePolicyRequired,
     LocalSourceCommandRequired,
-    LocalSourceProjectorPathForbidden,
+    MissingStagePeerNode,
     InvalidLocalSourceLoadMode { got: i32 },
     InvalidLocalSourceReference,
     InvalidSourceResolutionPolicy { got: i32 },
@@ -103,8 +103,8 @@ impl std::fmt::Display for StageFrameError {
                     "local-required source resolution requires the fail-closed local command"
                 )
             }
-            StageFrameError::LocalSourceProjectorPathForbidden => {
-                write!(f, "strict local load cannot carry a projector path")
+            StageFrameError::MissingStagePeerNode => {
+                write!(f, "a neighbouring stage must name its node")
             }
             StageFrameError::InvalidLocalSourceLoadMode { got } => write!(
                 f,
@@ -231,9 +231,6 @@ fn validate_local_source_load(load: &proto::stage::LoadStage) -> Result<(), Stag
     if load.source_model_sha256.as_deref() != Some(reference_digest) {
         return Err(StageFrameError::InvalidLocalSourceReference);
     }
-    if load.projector_path.is_some() {
-        return Err(StageFrameError::LocalSourceProjectorPathForbidden);
-    }
     Ok(())
 }
 
@@ -286,6 +283,14 @@ fn validate_load_stage_admission(load: &proto::stage::LoadStage) -> Result<(), S
     validate_activation_codec(load.activation_codec)?;
     validate_activation_codec_policy(load.activation_codec, load.activation_codec_policy)?;
     validate_topology_stages(load)?;
+    for peer in load.upstream.iter().chain(load.downstream.iter()) {
+        validate_endpoint_id(
+            peer.node_id
+                .as_ref()
+                .ok_or(StageFrameError::MissingStagePeerNode)?
+                .len(),
+        )?;
+    }
     Ok(())
 }
 

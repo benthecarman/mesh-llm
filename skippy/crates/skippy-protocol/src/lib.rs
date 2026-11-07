@@ -398,7 +398,6 @@ mod tests {
                 activation_codec_policy: super::proto::stage::StageActivationCodecPolicy::FixedV1
                     as i32,
                 load_mode: StageLoadMode::RuntimeSlice as i32,
-                projector_path: Some("/models/mmproj.gguf".to_string()),
                 source_model_sha256: Some("b6".repeat(32)),
                 source_resolution_policy: SourceResolutionPolicy::Fallback as i32,
                 runtime_profile: Some("strict-profile".to_string()),
@@ -418,7 +417,6 @@ mod tests {
         let decoded = StageControlRequest::decode(load.encode_to_vec().as_slice()).unwrap();
         match decoded.command {
             Some(stage_control_request::Command::LoadStage(load)) => {
-                assert_eq!(load.projector_path.as_deref(), Some("/models/mmproj.gguf"));
                 assert_eq!(
                     load.source_model_sha256.as_deref(),
                     Some("b6".repeat(32).as_str())
@@ -510,7 +508,6 @@ mod tests {
             validate_stage_control_request(&fallback_strict_load),
             Err(StageFrameError::LocalSourceCommandRequired)
         ));
-        strict_load_stage.projector_path = None;
         let strict_load = StageControlRequest {
             command: Some(stage_control_request::Command::LoadLocalStage(
                 strict_load_stage.clone(),
@@ -518,17 +515,26 @@ mod tests {
             ..frame.clone()
         };
         validate_stage_control_request(&strict_load).unwrap();
-        let mut projector_path_injection = strict_load.clone();
-        let Some(stage_control_request::Command::LoadLocalStage(load)) =
-            projector_path_injection.command.as_mut()
-        else {
-            unreachable!("strict fixture must contain LoadLocalStage")
+        let mut anonymous_neighbour = strict_load.clone();
+        let set_downstream_node = |request: &mut StageControlRequest, node_id: Option<Vec<u8>>| {
+            let Some(stage_control_request::Command::LoadLocalStage(load)) =
+                request.command.as_mut()
+            else {
+                unreachable!("strict fixture must contain LoadLocalStage")
+            };
+            load.downstream = Some(super::proto::stage::StagePeer {
+                stage_id: "stage-1".to_string(),
+                stage_index: 1,
+                node_id,
+            });
         };
-        load.projector_path = Some("/peer/private/mmproj.gguf".to_string());
+        set_downstream_node(&mut anonymous_neighbour, None);
         assert!(matches!(
-            validate_stage_control_request(&projector_path_injection),
-            Err(StageFrameError::LocalSourceProjectorPathForbidden)
+            validate_stage_control_request(&anonymous_neighbour),
+            Err(StageFrameError::MissingStagePeerNode)
         ));
+        set_downstream_node(&mut anonymous_neighbour, Some(vec![8u8; 32]));
+        validate_stage_control_request(&anonymous_neighbour).unwrap();
         let mut malformed_reference = strict_load.clone();
         let Some(stage_control_request::Command::LoadLocalStage(load)) =
             malformed_reference.command.as_mut()
@@ -636,7 +642,6 @@ mod tests {
                     shutdown_generation: 7,
                     ctx_size: 8192,
                     lane_count: 2,
-                    projector_path: Some("/models/mmproj.gguf".to_string()),
                     ..Default::default()
                 }),
                 error: None,
@@ -647,10 +652,6 @@ mod tests {
         match decoded.response {
             Some(stage_control_response::Response::StageReady(ready)) => {
                 let status = ready.status.expect("stage-ready status");
-                assert_eq!(
-                    status.projector_path.as_deref(),
-                    Some("/models/mmproj.gguf")
-                );
                 assert_eq!(status.lane_count, 2);
             }
             other => panic!("expected StageReady, got {other:?}"),
@@ -663,7 +664,6 @@ mod tests {
                     package_ref: "hf://repo/model".to_string(),
                     manifest_sha256: "a5".repeat(32),
                     layer_count: 16,
-                    source_model_path: Some("/model.gguf".to_string()),
                     source_model_bytes: Some(1024),
                     source_model_kind: SourceModelKind::PlainGguf as i32,
                     source_model_sha256: Some("b6".repeat(32)),

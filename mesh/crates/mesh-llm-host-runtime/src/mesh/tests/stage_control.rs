@@ -247,7 +247,7 @@ fn strict_stage_status_never_exposes_worker_source_path() {
 }
 
 #[test]
-fn content_addressed_status_redacts_projector_at_wire_boundary() {
+fn status_carries_no_local_paths_across_the_wire() {
     let digest = "9".repeat(64);
     let mut load = test_stage_load_request();
     load.package_ref = format!("local-gguf://sha256/{digest}");
@@ -255,14 +255,21 @@ fn content_addressed_status_redacts_projector_at_wire_boundary() {
     load.local_source_required = true;
     let mut status =
         stage_status_from_load(&load, crate::inference::skippy::StageRuntimeState::Ready);
-    // Simulate a stale internal/older-peer status that still contains a local
-    // projector path. Current wire conversion must fail closed.
+    status.bind_addr = "127.0.0.1:41000".to_string();
+    status.source_model_path = Some("/worker/private/model.gguf".to_string());
+    status.materialized_path = Some("/worker/private/stage".to_string());
     status.projector_path = Some("/worker/private/mmproj.gguf".to_string());
 
-    let proto = stage_status_to_proto(status);
-    assert!(proto.projector_path.is_none());
-    let decoded = stage_status_from_proto(proto).expect("strict status should decode");
-    assert!(decoded.projector_path.is_none());
+    let bytes = stage_status_to_proto(status).encode_to_vec();
+    let decoded = stage_status_from_proto(
+        skippy_protocol::proto::stage::StageStatus::decode(bytes.as_slice()).unwrap(),
+    )
+    .expect("strict status should decode");
+    // The loopback address stays: older coordinators check its port.
+    assert_eq!(decoded.bind_addr, "127.0.0.1:41000");
+    assert_eq!(decoded.source_model_path, None);
+    assert_eq!(decoded.materialized_path, None);
+    assert_eq!(decoded.projector_path, None);
 }
 
 #[test]
@@ -344,6 +351,91 @@ fn strict_local_load_uses_distinct_fail_closed_proto_command() {
         decoded.admission,
         crate::inference::skippy::test_stage_admission(12, 24)
     );
+}
+
+#[test]
+fn a_load_carries_no_local_paths_or_peer_addresses_across_the_wire() {
+    let requester = make_test_endpoint_id(0x8d);
+    let upstream_node = make_test_endpoint_id(0x60);
+    let draft_source = skippy_serving::split_dflash::SplitDFlashDraftSource {
+        repo: "owner/draft".to_string(),
+        revision: "12".repeat(20),
+        file: "draft.gguf".to_string(),
+        sha256: "ab".repeat(32),
+        bytes: 11,
+    };
+    for local in [false, true] {
+        let mut load = test_stage_load_request();
+        load.coordinator_id = Some(requester);
+        load.bind_addr = "0.0.0.0:7000".to_string();
+        load.model_path = Some("/home/victim/private/model.gguf".to_string());
+        load.projector_path = Some("/home/victim/private/mmproj.gguf".to_string());
+        load.upstream = Some(crate::inference::skippy::StagePeerDescriptor {
+            persistent_lane_marker: false,
+            stage_id: "stage-0".to_string(),
+            stage_index: 0,
+            endpoint: "10.0.0.5:9000".to_string(),
+            node_id: Some(upstream_node),
+        });
+        load.dflash = Some(skippy_serving::split_dflash::SplitDFlashStage {
+            target_layers: vec![1, 2],
+            draft_model_path: Some("/home/victim/private/draft.gguf".into()),
+            draft_source: Some(draft_source.clone()),
+            ..Default::default()
+        });
+        let request = if local {
+            let digest = "c".repeat(64);
+            load.package_ref = format!("local-gguf://sha256/{digest}");
+            load.source_model_sha256 = Some(digest);
+            load.local_source_required = true;
+            crate::inference::skippy::StageControlRequest::LoadLocal(load)
+        } else {
+            crate::inference::skippy::StageControlRequest::Load(load)
+        };
+
+        let bytes = stage_control_request_to_proto(requester, request)
+            .unwrap()
+            .encode_to_vec();
+        let frame =
+            skippy_protocol::proto::stage::StageControlRequest::decode(bytes.as_slice()).unwrap();
+        // Older receivers require a bind address, the same in this stage's
+        // topology entry; every one sent is the loopback placeholder.
+        let sent = match frame.command.as_ref() {
+            Some(
+                skippy_protocol::proto::stage::stage_control_request::Command::LoadStage(load)
+                | skippy_protocol::proto::stage::stage_control_request::Command::LoadLocalStage(
+                    load,
+                ),
+            ) => load,
+            _ => panic!("expected a stage load frame"),
+        };
+        assert_eq!(sent.bind_addr, "127.0.0.1:0", "local={local}");
+        assert!(
+            sent.topology_stages
+                .iter()
+                .all(|stage| stage.bind_addr == "127.0.0.1:0"),
+            "local={local}"
+        );
+        let decoded = match stage_control_request_from_proto(frame).unwrap() {
+            crate::inference::skippy::StageControlRequest::Load(load)
+            | crate::inference::skippy::StageControlRequest::LoadLocal(load) => load,
+            _ => panic!("expected a stage load request"),
+        };
+
+        assert_eq!(decoded.bind_addr, "127.0.0.1:0", "local={local}");
+        assert!(
+            decoded.topology_stages.iter().all(|stage| stage.bind_addr.is_empty()),
+            "local={local}"
+        );
+        assert_eq!(decoded.model_path, None, "local={local}");
+        assert_eq!(decoded.projector_path, None, "local={local}");
+        let upstream = decoded.upstream.expect("the upstream stage survives");
+        assert_eq!(upstream.endpoint, "", "local={local}");
+        assert_eq!(upstream.node_id, Some(upstream_node), "local={local}");
+        let dflash = decoded.dflash.expect("the DFlash plan survives");
+        assert_eq!(dflash.draft_model_path, None, "local={local}");
+        assert_eq!(dflash.draft_source, Some(draft_source.clone()), "local={local}");
+    }
 }
 
 #[test]
@@ -469,7 +561,7 @@ fn stage_control_inventory_response_round_trips_plain_gguf_source() {
         inventory.source_model_kind,
         crate::inference::skippy::SourceModelKind::PlainGguf
     );
-    assert_eq!(inventory.source_model_path.as_deref(), Some("/model.gguf"));
+    assert_eq!(inventory.source_model_path, None);
     assert_eq!(inventory.available_ranges[0].layer_start, 0);
     assert_eq!(inventory.available_ranges[0].layer_end, 32);
 }
@@ -1010,6 +1102,7 @@ async fn peer_load_without_downloads_is_refused_before_execution() -> Result<()>
         .resolve_stage_control_request(
             Some(&tx),
             &mut request,
+            crate::mesh::stage_source::StageLoadOrigin::Peer,
             crate::inference::skippy::StageSourceFetch::LocalOnly,
         )
         .await

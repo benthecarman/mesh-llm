@@ -67,6 +67,15 @@ prefill chunk of a wide boundary crosses as one frame; a chunk whose output
 still exceeds the budget is sent as consecutive prefill frames. All
 participants must advertise `stage-generation-16`; older peers fail closed.
 
+No node-local path crosses the stage protocol. A load names no model,
+projector or draft path: the receiving node resolves its own files from the
+content identity, and the final stage gets its DFlash draft only from the
+pinned `draft_source`. Status and inventory report no paths. A neighbouring
+stage is named by its node, never by an address. The removed fields are
+reserved; older nodes already work without them. Each bind address that
+remains is a loopback placeholder that receivers ignore. Senders keep it
+because older receivers require it.
+
 Admission requires mesh-subprotocol control, list-valued status responses,
 strict local-content identity, canonical stage-admission descriptors, and stale
 verify-window discard as one fail-closed capability bundle. Participants validate

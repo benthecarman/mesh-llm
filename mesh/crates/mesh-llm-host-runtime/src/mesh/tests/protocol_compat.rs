@@ -30,7 +30,8 @@ fn assert_decoded_stage_load(decoded: &crate::inference::skippy::StageLoadReques
         Some("certified")
     );
     assert!(!decoded.continuous_batching);
-    assert_eq!(decoded.model_path.as_deref(), Some("/models/demo.gguf"));
+    // The receiver resolves its own copy of the model; no path crosses the wire.
+    assert_eq!(decoded.model_path, None);
     assert_eq!(decoded.mmap, Some(false));
     assert!(decoded.mlock);
     assert_eq!(decoded.projector_use_gpu, Some(false));
@@ -383,7 +384,14 @@ fn stage_load_proto_carries_a_split_dflash_plan() {
 
     let decoded = stage_load_from_proto(stage_load_to_proto(load)).unwrap();
 
-    assert_eq!(decoded.dflash, Some(plan));
+    // The final stage fetches its own copy of the draft from the source.
+    assert_eq!(
+        decoded.dflash,
+        Some(skippy_serving::split_dflash::SplitDFlashStage {
+            draft_model_path: None,
+            ..plan
+        })
+    );
 }
 
 #[test]
@@ -457,7 +465,7 @@ fn a_stage_load_from_a_peer_without_split_dflash_has_no_plan() {
 }
 
 #[test]
-fn a_split_dflash_plan_from_an_older_planner_keeps_its_draft_path() {
+fn a_split_dflash_plan_without_a_source_names_no_draft() {
     let mut load = stage_load_request();
     load.dflash = Some(skippy_serving::split_dflash::SplitDFlashStage {
         target_layers: vec![2, 62],
@@ -470,10 +478,7 @@ fn a_split_dflash_plan_from_an_older_planner_keeps_its_draft_path() {
     let plan = stage_load_from_proto(proto).unwrap().dflash.unwrap();
 
     assert_eq!(plan.draft_source, None);
-    assert_eq!(
-        plan.draft_model_path.as_deref(),
-        Some(std::path::Path::new("/models/draft-dflash.gguf"))
-    );
+    assert_eq!(plan.draft_model_path, None);
 }
 
 #[test]
@@ -500,4 +505,38 @@ fn stage_load_proto_roundtrip_preserves_every_split_activation_codec() {
             (codec, policy)
         );
     }
+}
+
+/// A Load from an older coordinator still carries the removed path fields;
+/// this node decodes it and uses none of them.
+#[test]
+fn a_stage_load_from_an_older_coordinator_drops_its_paths() {
+    use prost::Message as _;
+    fn length_delimited(bytes: &mut Vec<u8>, tag: &[u8], value: &str) {
+        bytes.extend_from_slice(tag);
+        prost::encoding::encode_varint(value.len() as u64, bytes);
+        bytes.extend_from_slice(value.as_bytes());
+    }
+    let mut load = stage_load_request();
+    load.dflash = Some(skippy_serving::split_dflash::SplitDFlashStage {
+        target_layers: vec![2, 62],
+        ..Default::default()
+    });
+    let mut proto = stage_load_to_proto(load);
+    let mut plan = proto.dflash.take().unwrap().encode_to_vec();
+    // draft_model_path = 2
+    length_delimited(&mut plan, &[0x12], "/models/draft.gguf");
+    proto.dflash = Some(skippy_stage_proto::StageDFlashPlan::decode(plan.as_slice()).unwrap());
+    let mut bytes = proto.encode_to_vec();
+    // model_path = 11, projector_path = 22
+    length_delimited(&mut bytes, &[0x5a], "/models/demo.gguf");
+    length_delimited(&mut bytes, &[0xb2, 0x01], "/models/mmproj.gguf");
+
+    let decoded =
+        stage_load_from_proto(skippy_stage_proto::LoadStage::decode(bytes.as_slice()).unwrap())
+            .unwrap();
+
+    assert_eq!(decoded.model_path, None);
+    assert_eq!(decoded.projector_path, None);
+    assert_eq!(decoded.dflash.unwrap().draft_model_path, None);
 }
