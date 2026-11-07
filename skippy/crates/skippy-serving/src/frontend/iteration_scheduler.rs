@@ -15,6 +15,7 @@ use self::direct_batch::{
     pipeline_group_batch_size, resolve_pipeline_decode_groups, scheduler_safe_mode_from_value,
     should_serve_direct, take_direct_iteration_batch, validate_direct_iteration,
 };
+use self::direct_execution::SessionTarget;
 use self::direct_reply::DirectReply;
 use crate::frontend::admission::DECODE_BATCH_HEADROOM_TOKENS;
 use crate::frontend::generation::TokenControl;
@@ -134,7 +135,7 @@ struct ScheduledRequest {
 
 struct DirectIteration {
     session_id: String,
-    target_token_count: Option<u64>,
+    target: Option<SessionTarget>,
     token_ids: Vec<i32>,
     positions: Vec<i32>,
     sampling: Option<SamplingConfig>,
@@ -707,11 +708,61 @@ impl IterationScheduler {
         input: Option<ActivationFrame>,
         sample_last: bool,
     ) -> InferenceResult<SchedulerIterationOutcome> {
+        self.execute_targeted_frame_iteration(
+            session_id,
+            SessionTarget::TrimAhead(target_token_count),
+            token_ids,
+            positions,
+            sampling,
+            input,
+            sample_last,
+        )
+    }
+
+    /// Executes a peer stage's decode frame, which must run at `position`.
+    ///
+    /// A session that is ahead is trimmed back, as for
+    /// [`Self::execute_frame_iteration`]; a session that is still not at
+    /// `position` after that fails the frame instead of decoding at its own
+    /// position.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_peer_decode_frame_iteration(
+        &self,
+        session_id: &str,
+        position: u64,
+        token_ids: &[i32],
+        positions: &[i32],
+        sampling: Option<&SamplingConfig>,
+        input: Option<ActivationFrame>,
+        sample_last: bool,
+    ) -> InferenceResult<SchedulerIterationOutcome> {
+        self.execute_targeted_frame_iteration(
+            session_id,
+            SessionTarget::Exact(position),
+            token_ids,
+            positions,
+            sampling,
+            input,
+            sample_last,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_targeted_frame_iteration(
+        &self,
+        session_id: &str,
+        target: SessionTarget,
+        token_ids: &[i32],
+        positions: &[i32],
+        sampling: Option<&SamplingConfig>,
+        input: Option<ActivationFrame>,
+        sample_last: bool,
+    ) -> InferenceResult<SchedulerIterationOutcome> {
         let channel = self.direct_iteration_channel();
         self.execute_direct_iteration(
             &channel,
             session_id,
-            Some(target_token_count),
+            Some(target),
             token_ids,
             positions,
             sampling,
@@ -729,7 +780,7 @@ impl IterationScheduler {
         &self,
         channel: &DirectIterationChannel,
         session_id: &str,
-        target_token_count: Option<u64>,
+        target: Option<SessionTarget>,
         token_ids: &[i32],
         positions: &[i32],
         sampling: Option<&SamplingConfig>,
@@ -748,7 +799,7 @@ impl IterationScheduler {
         self.enqueue_command(SchedulerCommand::ExecuteIteration(Box::new(
             DirectIteration {
                 session_id: session_id.to_string(),
-                target_token_count,
+                target,
                 token_ids: token_ids.to_vec(),
                 positions: positions.to_vec(),
                 sampling: sampling.cloned(),

@@ -372,6 +372,29 @@ impl RuntimeState {
             .is_some_and(|known_tokens| token_end <= known_tokens)
     }
 
+    /// Fails unless the session stands exactly at `position`.
+    ///
+    /// Decode runs from the session's own position, not from the position a
+    /// peer stage names, so a decode for a session that is behind, or for a
+    /// session this stage does not know, would run at the wrong position. A
+    /// session that is not active counts as a fresh lane at position 0: only
+    /// a decode at position 0, such as the first decode of a one-token prompt,
+    /// may start one.
+    pub(crate) fn ensure_session_at_position(&self, session_id: &str, position: u64) -> Result<()> {
+        match self.session_token_counts.get(session_id).copied() {
+            Some(current) if current == position => Ok(()),
+            Some(current) => bail!(
+                "session {session_id} is at position {current}, \
+                 but the decode is at position {position}"
+            ),
+            None if position == 0 => Ok(()),
+            None => bail!(
+                "session {session_id} is not active, \
+                 so a decode at position {position} cannot start it"
+            ),
+        }
+    }
+
     pub fn export_kv_page(
         &mut self,
         session_id: &str,

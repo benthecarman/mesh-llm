@@ -33,6 +33,7 @@ use skippy_runtime::{
     ACTIVATION_FRAME_VERSION, ACTIVATION_MAX_PARTS, ActivationDesc, ActivationFrame, NativeMtpDraft,
 };
 
+use super::decode_position::ensure_decode_position;
 use super::native_mtp_reply::{
     native_mtp_draft_tokens, native_mtp_prediction_tokens, stage_native_mtp_draft,
     verify_reply_native_mtp_draft,
@@ -600,6 +601,8 @@ pub(crate) fn run_binary_stage_message(
     input: Option<&ActivationFrame>,
     options: BinaryStageExecutionOptions,
 ) -> Result<(i32, Vec<i32>, ActivationFrame, Option<StageNativeMtpDraft>)> {
+    // Before anything below can admit a lane for the session.
+    ensure_decode_position(runtime, session_id, message)?;
     runtime.dflash_split_input(session_id, input);
     // A draft owed for an earlier window is moot once the next message lands.
     runtime.dflash_take_deferred_draft(session_id);

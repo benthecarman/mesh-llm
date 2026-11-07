@@ -2,6 +2,7 @@ mod activation_cache;
 mod binary_kv;
 pub(crate) mod binary_messaging;
 pub(crate) mod connection_mode;
+mod decode_position;
 pub(crate) mod direct_return;
 pub(crate) mod forwarding;
 mod kv_eviction;

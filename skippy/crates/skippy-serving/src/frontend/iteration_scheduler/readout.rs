@@ -46,7 +46,7 @@ impl IterationScheduler {
             let result = self.enqueue_command(SchedulerCommand::ExecuteIteration(Box::new(
                 DirectIteration {
                     session_id: request.session_id.to_owned(),
-                    target_token_count: Some(request.position),
+                    target: Some(SessionTarget::TrimAhead(request.position)),
                     token_ids: request.tokens.to_vec(),
                     positions: Vec::new(),
                     sampling: None,

@@ -9,7 +9,7 @@ fn direct_iteration(session_id: &str, token_count: usize) -> DirectIteration {
     let (reply, _result) = std_mpsc::sync_channel(1);
     DirectIteration {
         session_id: session_id.to_string(),
-        target_token_count: None,
+        target: None,
         token_ids: vec![1; token_count],
         positions: Vec::new(),
         sampling: None,

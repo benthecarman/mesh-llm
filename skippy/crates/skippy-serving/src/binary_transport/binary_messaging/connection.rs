@@ -29,6 +29,7 @@ use crate::binary_transport::binary_kv::add_binary_record_stats;
 use crate::binary_transport::binary_kv::emit_binary_proactive_eviction;
 use crate::binary_transport::binary_kv::maybe_lookup_binary_prefill;
 use crate::binary_transport::binary_kv::maybe_record_binary_full_prefill;
+use crate::binary_transport::decode_position::ensure_decode_position;
 use crate::binary_transport::direct_return;
 use crate::binary_transport::direct_return::PredictionReturnSinks;
 use crate::binary_transport::forwarded_stage_message_timed;
@@ -569,7 +570,7 @@ fn handle_binary_connection_messages(
                             anyhow::anyhow!("batched decode frame has no authoritative position")
                         })?;
                     let outcome = iteration_scheduler
-                        .execute_frame_iteration(
+                        .execute_peer_decode_frame_iteration(
                             &session_key,
                             target_token_count,
                             &[token_id],
@@ -659,6 +660,16 @@ fn handle_binary_connection_messages(
                             } else {
                                 Default::default()
                             };
+                            // Reject a decode at the wrong position before
+                            // eviction drops resident prefixes for it.
+                            ensure_decode_position(
+                                runtime,
+                                &scheduler_session_key,
+                                &scheduler_message,
+                            )
+                            .map_err(|error| {
+                                skippy_inference_api::InferenceError::backend(format!("{error:#}"))
+                            })?;
                             let sessions_before =
                                 collect_session_stats.then(|| runtime.session_stats());
                             let eviction = if eviction_plan.required {
