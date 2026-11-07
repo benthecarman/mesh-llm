@@ -737,10 +737,18 @@ pub(super) fn configure_run_auto_process_state(
             .ok()
             .as_deref()
             == Some("1");
-    if verbose_native_debug {
-        skippy_runtime::enable_verbose_native_logs();
-    } else {
-        skippy_runtime::disable_verbose_native_logs();
+    // SAFETY: UNSAFE CONTRACT — the same startup ordering as the
+    // MESH_API_PORT write above: native threads read the level at backend
+    // init, so this must run before any native work. That ordering is not
+    // established yet: `--local-model-only` surveys hardware, which
+    // enumerates native backend devices, before calling this function.
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe {
+        if verbose_native_debug {
+            skippy_runtime::enable_verbose_native_logs();
+        } else {
+            skippy_runtime::disable_verbose_native_logs();
+        }
     }
 
     let native_log_rx = skippy_runtime::register_filtered_native_logs();

@@ -23,3 +23,40 @@ fn native_error_line_travels_with_the_open_error() {
     let again = super::with_last_native_error(anyhow::anyhow!("later failure"));
     assert_eq!(format!("{again:#}"), "later failure");
 }
+
+#[test]
+fn native_error_line_during_thread_teardown_is_dropped() {
+    // Native threads can log from thread-exit hooks after this thread's error
+    // lines are destroyed. A regression panics inside a thread-local
+    // destructor, which aborts the whole test binary with SIGABRT.
+    static RAN_AFTER_ERROR_LINES_DESTROYED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    struct LogsOnDrop;
+    impl Drop for LogsOnDrop {
+        fn drop(&mut self) {
+            let destroyed = super::NATIVE_ERROR_LINES.try_with(|_| ()).is_err();
+            RAN_AFTER_ERROR_LINES_DESTROYED.store(destroyed, std::sync::atomic::Ordering::SeqCst);
+            super::record_native_error_line(
+                super::NATIVE_LOG_LEVEL_ERROR,
+                b"ggml: error logged during thread teardown\n",
+            );
+        }
+    }
+    thread_local! {
+        static LATE_LOGGER: LogsOnDrop = const { LogsOnDrop };
+    }
+
+    std::thread::spawn(|| {
+        // Thread-local destructors run in reverse registration order, so
+        // touching the error lines second destroys them before LATE_LOGGER.
+        LATE_LOGGER.with(|_| {});
+        super::clear_last_native_error();
+    })
+    .join()
+    .expect("teardown thread should exit cleanly");
+    assert!(
+        RAN_AFTER_ERROR_LINES_DESTROYED.load(std::sync::atomic::Ordering::SeqCst),
+        "the late log did not run after the error lines were destroyed; \
+         this test no longer exercises thread teardown"
+    );
+}

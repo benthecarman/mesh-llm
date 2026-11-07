@@ -160,6 +160,46 @@ fn raw_sink_receives_severity_and_text_without_filtered_forwarding() {
     restore_native_logs();
 }
 
+#[test]
+fn panicking_sink_does_not_unwind_into_the_native_caller() {
+    let _guard = native_log_test_guard();
+    struct RestoreNativeLogs;
+    impl Drop for RestoreNativeLogs {
+        fn drop(&mut self) {
+            restore_native_logs();
+        }
+    }
+    struct PanickingSink;
+    impl NativeLogSink for PanickingSink {
+        fn write(&self, _level: i32, _text: &str) {
+            panic!("native log sink failure");
+        }
+    }
+    struct RecordingSink(std::sync::mpsc::Sender<String>);
+    impl NativeLogSink for RecordingSink {
+        fn write(&self, _level: i32, text: &str) {
+            let _ = self.0.send(text.to_owned());
+        }
+    }
+    let _restore = RestoreNativeLogs;
+    set_filtered_native_logs_enabled(false);
+    set_native_log_sink(Arc::new(PanickingSink));
+    let message = CString::new("llama_model_loader: loading weights\n").unwrap();
+    // SAFETY: The CString stays alive for the synchronous callback invocation.
+    // A panic escaping this `extern "C"` callback would abort the test binary.
+    unsafe { write_native_log(log_level(2), message.as_ptr(), ptr::null_mut()) };
+
+    // The contained panic leaves native log forwarding usable.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    set_native_log_sink(Arc::new(RecordingSink(sender)));
+    // SAFETY: As above.
+    unsafe { write_native_log(log_level(2), message.as_ptr(), ptr::null_mut()) };
+    assert_eq!(
+        receiver.try_recv().unwrap(),
+        message.to_string_lossy().into_owned()
+    );
+}
+
 #[cfg(test)]
 fn log_level(level: i32) -> skippy_ffi::bindings::llama::ggml_log_level {
     // Test helper: the generated enum mirrors the C values verbatim.

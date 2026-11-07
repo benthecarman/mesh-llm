@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::io::Write;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -123,8 +124,7 @@ pub struct MeasuredNativeBuffers {
 /// reachable; its fields stay `None` until a buffer line is observed (e.g.
 /// native log forwarding disabled).
 pub fn measured_native_buffers() -> Option<MeasuredNativeBuffers> {
-    let aggregator = native_log_aggregator().lock().ok()?;
-    Some(aggregator.measured_snapshot())
+    Some(lock_native_log_aggregator().measured_snapshot())
 }
 
 #[derive(Debug, Default)]
@@ -242,28 +242,44 @@ fn native_log_aggregator() -> &'static Mutex<NativeLogAggregator> {
     NATIVE_LOG_AGGREGATOR.get_or_init(|| Mutex::new(NativeLogAggregator::default()))
 }
 
+/// Locks native-log state even after a panic contained in the native log
+/// callback poisoned it, so one failed line does not stop logging for the
+/// rest of the process.
+fn lock_native_log_state<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        mutex.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
+/// Like [`lock_native_log_state`], but a poisoned aggregator is reset: the
+/// panic may have left a line half parsed.
+fn lock_native_log_aggregator() -> MutexGuard<'static, NativeLogAggregator> {
+    let mutex = native_log_aggregator();
+    mutex.lock().unwrap_or_else(|poisoned| {
+        mutex.clear_poison();
+        let mut aggregator = poisoned.into_inner();
+        aggregator.reset();
+        aggregator
+    })
+}
+
+fn native_log_filtered_tx() -> &'static Mutex<Option<mpsc::UnboundedSender<NativeLogEvent>>> {
+    NATIVE_LOG_FILTERED_TX.get_or_init(|| Mutex::new(None))
+}
+
 /// Register a channel receiver for filtered native log messages.
 /// Returns the receiver end; call this once before model loading begins.
 pub fn register_filtered_native_logs() -> mpsc::UnboundedReceiver<NativeLogEvent> {
     let (tx, rx) = mpsc::unbounded_channel();
-    NATIVE_LOG_FILTERED_TX
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap()
-        .replace(tx);
-    if let Ok(mut aggregator) = native_log_aggregator().lock() {
-        aggregator.reset();
-    }
+    lock_native_log_state(native_log_filtered_tx()).replace(tx);
+    lock_native_log_aggregator().reset();
     rx
 }
 
 pub fn unregister_filtered_native_logs() {
-    if let Some(sender) = NATIVE_LOG_FILTERED_TX.get() {
-        sender.lock().unwrap().take();
-    }
-    if let Ok(mut aggregator) = native_log_aggregator().lock() {
-        aggregator.reset();
-    }
+    lock_native_log_state(native_log_filtered_tx()).take();
+    lock_native_log_aggregator().reset();
 }
 
 pub fn set_filtered_native_logs_enabled(enabled: bool) {
@@ -847,9 +863,7 @@ pub(crate) fn write_native_log_fallback_note(note: impl AsRef<str>) {
 
 fn write_native_log_note_with_mask(note: impl AsRef<str>, required_mask: u8) {
     let note = sanitize_native_log_note(note.as_ref());
-    if let Ok(mut guard) = native_log_file().lock()
-        && let Some(writer) = guard.as_mut()
-    {
+    if let Some(writer) = lock_native_log_state(native_log_file()).as_mut() {
         let _ = writeln!(writer, "mesh-llm: {note}");
         let _ = writer.flush();
     }
@@ -866,30 +880,34 @@ fn forward_native_log_note(note: String, required_mask: u8) {
         category: "model",
         params: Vec::new(),
     };
-    if let Some(sender) = NATIVE_LOG_FILTERED_TX.get()
-        && let Ok(guard) = sender.lock()
-        && let Some(tx) = guard.as_ref()
-    {
+    if let Some(tx) = lock_native_log_state(native_log_filtered_tx()).as_ref() {
         let _ = tx.send(event);
     }
 }
 
 /// Enable verbose llama.cpp logging. Call before `llama_backend_init()` / model loading.
 /// Sets GGML_LLAMA_LOG_LEVEL=4 so LLAMA_LOG_DEBUG macros produce output.
-pub fn enable_verbose_native_logs() {
-    // SAFETY: UNSAFE CONTRACT — callers must invoke this before concurrent
-    // runtime work can access the process environment. The API does not yet
-    // enforce that startup boundary; retain the audit TODO below.
-    // TODO: Audit that the environment access only happens in single-threaded code.
+///
+/// # Safety
+///
+/// This writes the process environment, which is undefined behavior while
+/// another thread (Rust or native) may read or write it. Call it only during
+/// startup, before native threads exist and before any other thread can
+/// access the environment; see [`std::env::set_var`].
+pub unsafe fn enable_verbose_native_logs() {
+    // SAFETY: The caller upholds this function's startup-only contract.
     unsafe { std::env::set_var("GGML_LLAMA_LOG_LEVEL", LLAMA_LOG_LEVEL_DEBUG) };
 }
 
 /// Disable verbose llama.cpp logging (restore default level).
-pub fn disable_verbose_native_logs() {
-    // SAFETY: UNSAFE CONTRACT — callers must invoke this before concurrent
-    // runtime work can access the process environment. The API does not yet
-    // enforce that startup boundary; retain the audit TODO below.
-    // TODO: Audit that the environment access only happens in single-threaded code.
+///
+/// # Safety
+///
+/// Same contract as [`enable_verbose_native_logs`]: call it only during
+/// startup, while no other thread can access the process environment; see
+/// [`std::env::remove_var`].
+pub unsafe fn disable_verbose_native_logs() {
+    // SAFETY: The caller upholds this function's startup-only contract.
     unsafe { std::env::remove_var("GGML_LLAMA_LOG_LEVEL") };
 }
 
@@ -915,9 +933,12 @@ fn record_native_error_line(level: c_int, bytes: &[u8]) {
     if line.is_empty() {
         return;
     }
-    NATIVE_ERROR_LINES.with(|lines| {
-        let mut lines = lines.borrow_mut();
-        if lines.len() < MAX_NATIVE_ERROR_LINES {
+    // Native threads can log while their thread-local storage is being torn
+    // down, where `with` would panic; such a line has no open to attach to.
+    let _ = NATIVE_ERROR_LINES.try_with(|lines| {
+        if let Ok(mut lines) = lines.try_borrow_mut()
+            && lines.len() < MAX_NATIVE_ERROR_LINES
+        {
             lines.push(line);
         }
     });
@@ -946,12 +967,25 @@ unsafe extern "C" fn write_native_log(
         return;
     }
 
+    // SAFETY: llama.cpp, ggml and mtmd pass a live NUL-terminated string that
+    // outlives this synchronous callback.
     let bytes = unsafe { CStr::from_ptr(text) }.to_bytes();
-    record_native_error_line(level as c_int, bytes);
-    output::forward_raw_native_log(level as c_int, bytes);
-    if let Ok(mut guard) = native_log_file().lock()
-        && let Some(writer) = guard.as_mut()
-    {
+    // A panic must not unwind into native frames: a Rust panic leaving an
+    // `extern "C"` function aborts the process. Losing one log line is the
+    // lesser failure; the locks it takes recover from the poisoning.
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        handle_native_log(level as c_int, bytes);
+    }));
+    if let Err(payload) = result {
+        // Dropping an arbitrary payload could itself panic in this frame.
+        std::mem::forget(payload);
+    }
+}
+
+fn handle_native_log(level: c_int, bytes: &[u8]) {
+    record_native_error_line(level, bytes);
+    output::forward_raw_native_log(level, bytes);
+    if let Some(writer) = lock_native_log_state(native_log_file()).as_mut() {
         let _ = writer.write_all(bytes);
     }
 
@@ -962,14 +996,8 @@ unsafe extern "C" fn write_native_log(
     }
 
     if let Ok(text_str) = core::str::from_utf8(bytes) {
-        let events = match native_log_aggregator().lock() {
-            Ok(mut aggregator) => aggregator.process_line(text_str.trim()),
-            _ => Vec::new(),
-        };
-        if let Some(tx) = NATIVE_LOG_FILTERED_TX.get()
-            && let Ok(guard) = tx.lock()
-            && let Some(ref sender) = *guard
-        {
+        let events = lock_native_log_aggregator().process_line(text_str.trim());
+        if let Some(sender) = lock_native_log_state(native_log_filtered_tx()).as_ref() {
             for event in events {
                 if category_mask(event.category).is_some_and(|mask| forwarding_mask & mask != 0) {
                     let _ = sender.send(event);

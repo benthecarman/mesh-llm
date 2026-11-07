@@ -10,14 +10,15 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 
 static NATIVE_LOG_FILE: OnceLock<Mutex<Option<LineWriter<File>>>> = OnceLock::new();
 static NATIVE_LOG_SINK: RwLock<Option<Arc<dyn NativeLogSink>>> = RwLock::new(None);
 
 /// Optional product-owned destination for raw llama.cpp, ggml and mtmd logs.
 /// Called synchronously from native threads with ggml_log_level values.
-/// Implementations must not panic or reenter native inference.
+/// Implementations must not reenter native inference. A panic is contained
+/// in the callback and drops the rest of that line's handling.
 pub trait NativeLogSink: Send + Sync {
     fn write(&self, level: i32, text: &str);
 }
@@ -55,10 +56,9 @@ fn clear_native_log_output() {
     *NATIVE_LOG_SINK
         .write()
         .unwrap_or_else(|error| error.into_inner()) = None;
-    if let Ok(mut guard) = native_log_file().lock() {
-        flush_native_log_writer(&mut guard);
-        *guard = None;
-    }
+    let mut guard = super::lock_native_log_state(native_log_file());
+    flush_native_log_writer(&mut guard);
+    *guard = None;
 }
 
 fn set_native_log_callback(callback: skippy_ffi::LlamaLogCallback) {
@@ -84,9 +84,7 @@ pub fn redirect_native_logs_to_file(path: impl AsRef<Path>) -> Result<()> {
     let file = options
         .open(path)
         .with_context(|| format!("open skippy native log file {}", path.display()))?;
-    let mut guard = native_log_file()
-        .lock()
-        .map_err(|_| anyhow!("native log file mutex poisoned"))?;
+    let mut guard = super::lock_native_log_state(native_log_file());
     flush_native_log_writer(&mut guard);
     *guard = Some(LineWriter::new(file));
     drop(guard);
