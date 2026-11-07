@@ -226,8 +226,8 @@ pub fn skippy_decode_step_sampled_mtp_fn() -> Option<SkippyDecodeStepSampledMtpF
 #[cfg(not(feature = "dynamic-runtime"))]
 pub fn llama_perf_context_optional() -> Option<LlamaPerfContextFn> {
     // The generated declaration names `*const llama_context`; the facade
-    // keeps the historical `*mut Opaque` signature, so adapt at the boundary.
-    unsafe extern "C" fn perf_context_shim(ctx: *mut Opaque) -> LlamaPerfContextData {
+    // passes the handle as `*const Opaque`, so adapt at the boundary.
+    unsafe extern "C" fn perf_context_shim(ctx: *const Opaque) -> LlamaPerfContextData {
         unsafe { static_bindings::llama_perf_context(ctx.cast()) }
     }
     Some(perf_context_shim)

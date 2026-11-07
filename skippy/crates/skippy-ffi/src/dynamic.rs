@@ -4,6 +4,8 @@ use std::{
     sync::OnceLock,
 };
 
+mod signature_check;
+
 use crate::llama_draft::LlamaDraftApi;
 use crate::{
     ABI_VERSION_MAJOR, ABI_VERSION_MINOR, ABI_VERSION_PATCH, AbiVersion, ActivationBoundaryDesc,
@@ -79,6 +81,7 @@ fn symbols() -> &'static Symbols {
 }
 
 type SkippyAbiVersionFn = unsafe extern "C" fn() -> AbiVersion;
+signature_check::check_signature!(skippy::skippy_abi_version() as SkippyAbiVersionFn);
 
 fn check_runtime_abi(libraries: &[Library]) -> Result<(), NativeRuntimeLoadError> {
     let mut abi_version = None;
@@ -107,12 +110,30 @@ fn check_runtime_abi(libraries: &[Library]) -> Result<(), NativeRuntimeLoadError
     Ok(())
 }
 
+/// Declares the required native symbols, grouped by the generated
+/// [`crate::bindings`] module that declares each one. Every signature is
+/// checked against that declaration at compile time (see
+/// [`signature_check`]).
 macro_rules! dynamic_symbols {
-    ($($name:ident($($arg:ident: $arg_ty:ty),* $(,)?) $(-> $ret:ty)?;)+) => {
+    ($($module:ident {
+        $($name:ident($($arg:ident: $arg_ty:ty),* $(,)?) $(-> $ret:ty)?;)+
+    })+) => {
+        const _: () = {
+            $($(
+                let native: unsafe extern "C" fn(
+                    $(signature_check::inferred_parameter!($arg_ty)),*
+                ) -> _ = crate::bindings::$module::$name;
+                signature_check::assert_signature(
+                    std::marker::PhantomData::<unsafe extern "C" fn($($arg_ty),*) $(-> $ret)?>,
+                    &native,
+                );
+            )+)+
+        };
+
         #[allow(non_snake_case)]
         struct Symbols {
             _libraries: Vec<Library>,
-            $($name: unsafe extern "C" fn($($arg_ty),*) $(-> $ret)?,)+
+            $($($name: unsafe extern "C" fn($($arg_ty),*) $(-> $ret)?,)+)+
         }
 
         impl Symbols {
@@ -133,7 +154,7 @@ macro_rules! dynamic_symbols {
                     );
                 }
                 check_runtime_abi(&libraries)?;
-                $(
+                $($(
                     let mut $name = None;
                     for library in libraries.iter().rev() {
                         if let Ok(symbol) = unsafe {
@@ -151,180 +172,186 @@ macro_rules! dynamic_symbols {
                             stringify!($name),
                         ))
                     })?;
-                )+
+                )+)+
                 Ok(Self {
                     _libraries: libraries,
-                    $($name,)+
+                    $($($name,)+)+
                 })
             }
         }
 
-        $(
+        $($(
             #[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
             pub unsafe fn $name($($arg: $arg_ty),*) $(-> $ret)? {
                 unsafe { (symbols().$name)($($arg),*) }
             }
-        )+
+        )+)+
     };
 }
 
 dynamic_symbols! {
-    llama_get_embeddings_ith(ctx: *mut Opaque, index: i32) -> *mut f32;
-    llama_set_embeddings(ctx: *mut Opaque, embeddings: bool);
-    llama_model_get_vocab(model: *const Opaque) -> *const Opaque;
-    llama_vocab_n_tokens(vocab: *const Opaque) -> i32;
-    llama_log_set(log_callback: LlamaLogCallback, user_data: *mut c_void);
-    ggml_log_set(log_callback: LlamaLogCallback, user_data: *mut c_void);
-    llama_model_quantize_default_params() -> LlamaModelQuantizeParams;
-    llama_model_quantize(fname_inp: *const c_char, fname_out: *const c_char, params: *const LlamaModelQuantizeParams) -> u32;
-    skippy_error_free(error: *mut Error);
-    skippy_ngram_cache_create(ngram_min: u16, ngram_max: u16, out_cache: *mut *mut NgramCache, out_error: *mut *mut Error) -> Status;
-    skippy_ngram_cache_free(cache: *mut NgramCache);
-    skippy_ngram_cache_reset(cache: *mut NgramCache, token_ids: *const i32, token_count: usize, out_error: *mut *mut Error) -> Status;
-    skippy_ngram_cache_append(cache: *mut NgramCache, token_ids: *const i32, token_count: usize, out_error: *mut *mut Error) -> Status;
-    skippy_ngram_cache_draft(cache: *mut NgramCache, continuation_prefix: *const i32, continuation_prefix_count: usize, max_draft_tokens: u16, output_tokens: *mut i32, output_token_capacity: usize, out_token_count: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_backend_device_count(out_count: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_backend_device_at(index: usize, out_device: *mut BackendDevice, out_error: *mut *mut Error) -> Status;
-    skippy_model_open(path: *const c_char, config: *const RuntimeConfig, out_model: *mut *mut Model, out_error: *mut *mut Error) -> Status;
-    skippy_model_open_from_parts(paths: *const *const c_char, path_count: usize, config: *const RuntimeConfig, out_model: *mut *mut Model, out_error: *mut *mut Error) -> Status;
-    skippy_model_open_from_source(metadata_gguf: *const c_void, metadata_gguf_size: usize, source: *const ModelTensorSourceV1, quantization_ftype: i32, config: *const RuntimeConfig, out_model: *mut *mut Model, out_error: *mut *mut Error) -> Status;
-    skippy_model_free(model: *mut Model, out_error: *mut *mut Error) -> Status;
-    skippy_model_llama_model(model: *const Model) -> *const Opaque;
-    skippy_model_output_activation_boundary(model: *const Model, out_desc: *mut ActivationBoundaryDesc) -> bool;
-    skippy_model_input_activation_boundary(model: *const Model, out_desc: *mut ActivationBoundaryDesc) -> bool;
-    skippy_system_one_canvas_length(model: *mut Model, out_canvas_token_count: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_system_one_read(model: *mut Model, prompt_tokens: *const i32, prompt_token_count: usize, canvas_tokens: *const i32, canvas_token_count: usize, label_token_ids: *const i32, label_token_count: usize, slots: *const SystemOneSlot, slot_count: usize, out_probabilities: *mut f32, output_capacity: usize, out_output_count: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_model_workload_info_v1(model: *const Model, out_info: *mut WorkloadInfoV1, out_error: *mut *mut Error) -> Status;
-    skippy_model_supports_causal_readout(model: *const Model) -> bool;
-    skippy_laya_model_open(model_path: *const c_char, n_threads: i32, device: *const c_char, out_model: *mut *mut LayaModel, out_error: *mut *mut Error) -> Status;
-    skippy_laya_model_free(model: *mut LayaModel);
-    skippy_clef_model_open(model_path: *const c_char, n_ctx: i32, n_threads: i32, n_gpu_layers: i32, out_model: *mut *mut ClefModel, out_error: *mut *mut Error) -> Status;
-    skippy_clef_model_free(model: *mut ClefModel);
-    skippy_clef_model_info_v1(model: *const ClefModel, out_info: *mut ClefInfoV1, out_error: *mut *mut Error) -> Status;
-    skippy_clef_model_decision_metadata(model: *const ClefModel, index: u32, out_key: *mut c_char, key_capacity: usize, out_value: *mut c_char, value_capacity: usize, out_error: *mut *mut Error) -> Status;
-    skippy_clef_plan(model: *const ClefModel, request_json: *const c_char, request_len: usize, out_tokens: *mut i32, out_orders: *mut i32, capacity: usize, out_token_count: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_clef_read(model: *mut ClefModel, request_json: *const c_char, request_len: usize, out_scores: *mut f32, capacity: usize, out_score_count: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_laya_model_memory_v1(model: *mut LayaModel, out_info: *mut LayaMemoryV1, out_error: *mut *mut Error) -> Status;
-    skippy_laya_model_info_v1(model: *const LayaModel, out_info: *mut LayaInfoV1, out_error: *mut *mut Error) -> Status;
-    skippy_laya_tokenize(model: *const LayaModel, text: *const c_char, text_len: usize, out_tokens: *mut i32, capacity: usize, out_token_count: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_laya_read(model: *mut LayaModel, tokens: *const i32, token_count: usize, marker_positions: *const i32, marker_count: usize, sequences: *const LayaSequence, sequence_count: usize, out_logits: *mut f32, logits_capacity: usize, out_act_logits: *mut f32, act_logits_capacity: usize, out_error: *mut *mut Error) -> Status;
-    skippy_asr_model_open(model_path: *const c_char, device: *const c_char, out_model: *mut *mut AsrModel, out_error: *mut *mut Error) -> Status;
-    skippy_asr_model_free(model: *mut AsrModel);
-    skippy_asr_model_info_v1(model: *const AsrModel, out_info: *mut AsrInfoV1, out_error: *mut *mut Error) -> Status;
-    skippy_asr_decode_audio(data: *const u8, len: usize, out_samples: *mut *mut f32, out_sample_count: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_asr_samples_free(samples: *mut f32);
-    skippy_asr_transcribe(model: *mut AsrModel, samples: *const f32, sample_count: usize, params: *const AsrTranscribeParamsV1, abort_callback: AsrAbortCallback, abort_user_data: *mut c_void, out_result: *mut *mut AsrResult, out_error: *mut *mut Error) -> Status;
-    skippy_asr_result_segment_count(result: *const AsrResult) -> usize;
-    skippy_asr_result_segment_v1(result: *const AsrResult, index: usize, out_segment: *mut AsrSegmentV1, out_error: *mut *mut Error) -> Status;
-    skippy_asr_result_language(result: *const AsrResult) -> *const c_char;
-    skippy_asr_result_duration_seconds(result: *const AsrResult) -> f64;
-    skippy_asr_result_free(result: *mut AsrResult);
-    skippy_session_create(model: *mut Model, out_session: *mut *mut Session, out_error: *mut *mut Error) -> Status;
-    skippy_session_create_from_resident_prefix(model: *mut Model, cache_seq_id: i32, token_ids: *const i32, token_count: usize, out_session: *mut *mut Session, out_error: *mut *mut Error) -> Status;
-    skippy_session_llama_context(session: *mut Session) -> *mut Opaque;
-    skippy_session_position(session: *const Session) -> i32;
-    skippy_session_batch_size(session: *const Session) -> i32;
-    skippy_session_sequence_id(session: *const Session) -> i32;
-    skippy_session_begin_external_decode(session: *mut Session, out_error: *mut *mut Error) -> Status;
-    skippy_session_end_external_decode(session: *mut Session, out_error: *mut *mut Error) -> Status;
-    skippy_session_set_position(session: *mut Session, n_past: i32, out_error: *mut *mut Error) -> Status;
-    skippy_session_restore_token_history(session: *mut Session, token_ids: *const i32, token_count: usize, out_error: *mut *mut Error) -> Status;
-    skippy_session_sample_current(session: *mut Session, sampling: *const SamplingConfig, out_predicted_token: *mut i32, out_error: *mut *mut Error) -> Status;
-    skippy_session_configure_chat_sampling(session: *mut Session, sampling: *const SamplingConfig, metadata_json: *const c_char, prompt_token_count: u64, out_error: *mut *mut Error) -> Status;
-    skippy_session_embed(session: *mut Session, token_ids: *const i32, token_count: usize, output: *mut f32, output_capacity: usize, out_dimensions: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_session_rerank(session: *mut Session, query: *const c_char, document: *const c_char, out_score: *mut f32, out_token_count: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_session_encode_prompt(session: *mut Session, token_ids: *const i32, token_count: usize, out_decoder_start_token: *mut i32, out_error: *mut *mut Error) -> Status;
-    skippy_session_reset(session: *mut Session, out_error: *mut *mut Error) -> Status;
-    skippy_session_free(session: *mut Session, out_error: *mut *mut Error) -> Status;
-    skippy_prefill_chunk(session: *mut Session, token_ids: *const i32, token_count: usize, input_activations: *const c_void, input_activation_bytes: usize, output_activations: *mut c_void, output_activation_capacity: usize, out_output_activation_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_verify_tokens(session: *mut Session, token_ids: *const i32, token_count: usize, output_tokens: *mut i32, output_token_capacity: usize, out_token_count: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_decode_step_sampled(session: *mut Session, token_id: i32, sampling: *const SamplingConfig, input_activation: *const c_void, input_activation_bytes: usize, output_activation: *mut c_void, output_activation_capacity: usize, out_output_activation_bytes: *mut usize, out_predicted_token: *mut i32, out_error: *mut *mut Error) -> Status;
-    skippy_decode_batch_sampled(sessions: *const *mut Session, token_ids: *const i32, sampling: *const *const SamplingConfig, request_count: usize, out_predicted_tokens: *mut i32, predicted_token_capacity: usize, out_error: *mut *mut Error) -> Status;
-    skippy_iteration_batch_sampled(requests: *const IterationRequest, request_count: usize, output_descs: *mut ActivationDesc, output_payloads: *const *mut c_void, output_payload_capacities: *const usize, out_output_payload_bytes: *mut usize, out_sampled_request_indexes: *mut usize, out_predicted_tokens: *mut i32, sampled_output_capacity: usize, out_sampled_output_count: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_prefill_chunk_frame(session: *mut Session, token_ids: *const i32, token_count: usize, input_desc: *const ActivationDesc, input_payload: *const c_void, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_prefill_chunk_frame_sampled(session: *mut Session, token_ids: *const i32, token_count: usize, sampling: *const SamplingConfig, input_desc: *const ActivationDesc, input_payload: *const c_void, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, out_predicted_token: *mut i32, out_error: *mut *mut Error) -> Status;
-    skippy_prefill_chunk_frame_with_positions(session: *mut Session, token_ids: *const i32, token_count: usize, positions: *const i32, position_count: usize, input_desc: *const ActivationDesc, input_payload: *const c_void, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_prefill_chunk_frame_sampled_with_positions(session: *mut Session, token_ids: *const i32, token_count: usize, positions: *const i32, position_count: usize, sampling: *const SamplingConfig, input_desc: *const ActivationDesc, input_payload: *const c_void, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, out_predicted_token: *mut i32, out_error: *mut *mut Error) -> Status;
-    skippy_decode_step_frame_sampled(session: *mut Session, token_id: i32, sampling: *const SamplingConfig, input_desc: *const ActivationDesc, input_payload: *const c_void, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, out_predicted_token: *mut i32, out_error: *mut *mut Error) -> Status;
-    skippy_decode_step_frame_sampled_mtp(session: *mut Session, token_id: i32, sampling: *const SamplingConfig, input_desc: *const ActivationDesc, input_payload: *const c_void, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, out_predicted_token: *mut i32, max_draft_tokens: usize, out_mtp_draft: *mut NativeMtpDraft, out_error: *mut *mut Error) -> Status;
-    skippy_decode_step_frame_batch_sampled(sessions: *const *mut Session, token_ids: *const i32, sampling: *const *const SamplingConfig, input_descs: *const *const ActivationDesc, input_payloads: *const *const c_void, output_descs: *mut ActivationDesc, output_payloads: *const *mut c_void, output_payload_capacities: *const usize, out_output_payload_bytes: *mut usize, out_predicted_tokens: *mut i32, predicted_token_capacity: usize, request_count: usize, out_error: *mut *mut Error) -> Status;
-    skippy_verify_tokens_frame_sampled(session: *mut Session, token_ids: *const i32, token_count: usize, sampling: *const SamplingConfig, input_desc: *const ActivationDesc, input_payload: *const c_void, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, output_tokens: *mut i32, output_token_capacity: usize, out_token_count: *mut usize, max_draft_tokens: usize, out_mtp_draft: *mut NativeMtpDraft, out_error: *mut *mut Error) -> Status;
-    skippy_session_copy_output_activation_frame(session: *mut Session, token_count: usize, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_session_last_token_signal(session: *mut Session, out_signal: *mut TokenSignal, out_error: *mut *mut Error) -> Status;
-    skippy_session_take_token_logprobs(session: *mut Session, out_entries: *mut TokenLogprobs, capacity: usize, out_count: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_session_signal_window(session: *mut Session, window_tokens: u32, out_window: *mut GenerationSignalWindow, out_error: *mut *mut Error) -> Status;
-    skippy_trim_session(session: *mut Session, token_count: u64, out_error: *mut *mut Error) -> Status;
-    skippy_retire_verify_checkpoint(session: *mut Session, token_start: u64, token_count: u64, out_error: *mut *mut Error) -> Status;
-    skippy_session_verify_rollback_counts(session: *const Session, out_in_place: *mut u64, out_checkpointed: *mut u64, out_error: *mut *mut Error) -> Status;
-    skippy_export_state(session: *mut Session, layer_start: i32, layer_end: i32, output: *mut c_void, output_capacity: usize, out_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_import_state(session: *mut Session, layer_start: i32, layer_end: i32, input: *const c_void, input_bytes: usize, out_error: *mut *mut Error) -> Status;
-    skippy_export_full_state(session: *mut Session, layer_start: i32, layer_end: i32, output: *mut c_void, output_capacity: usize, out_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_import_full_state(session: *mut Session, layer_start: i32, layer_end: i32, input: *const c_void, input_bytes: usize, out_error: *mut *mut Error) -> Status;
-    skippy_export_kv_page(session: *mut Session, layer_start: i32, layer_end: i32, token_start: u64, token_count: u64, out_desc: *mut KvPageDesc, output: *mut c_void, output_capacity: usize, out_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_import_kv_page(session: *mut Session, desc: *const KvPageDesc, input: *const c_void, input_bytes: usize, out_error: *mut *mut Error) -> Status;
-    skippy_import_cachegen_kv_page_v1(session: *mut Session, desc: *const KvPageDesc, records: *const CacheGenRecordV1, record_count: usize, out_error: *mut *mut Error) -> Status;
-    skippy_model_memory_cache_capabilities(model: *const Model) -> u32;
-    skippy_export_recurrent_state(session: *mut Session, output: *mut c_void, output_capacity: usize, out_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_import_recurrent_state(session: *mut Session, input: *const c_void, input_bytes: usize, out_error: *mut *mut Error) -> Status;
-    skippy_session_save_prefix(session: *mut Session, cache_seq_id: i32, token_count: u64, out_error: *mut *mut Error) -> Status;
-    skippy_session_restore_prefix(session: *mut Session, cache_seq_id: i32, token_ids: *const i32, token_count: usize, out_error: *mut *mut Error) -> Status;
-    skippy_session_memory_used_cells(session: *mut Session, out_used_cells: *mut u64, out_error: *mut *mut Error) -> Status;
-    skippy_session_drop_sequence(session: *mut Session, seq_id: i32, out_error: *mut *mut Error) -> Status;
-    skippy_tokenize(model: *mut Model, text: *const c_char, add_special: bool, output_tokens: *mut i32, output_token_capacity: usize, out_token_count: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_detokenize(model: *mut Model, tokens: *const i32, token_count: usize, output_text: *mut c_char, output_text_capacity: usize, out_text_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_token_is_eog(model: *mut Model, token_id: i32, out_is_eog: *mut bool, out_error: *mut *mut Error) -> Status;
-    skippy_model_info_open(path: *const c_char, out_info: *mut *mut ModelInfo, out_error: *mut *mut Error) -> Status;
-    skippy_model_info_free(info: *mut ModelInfo, out_error: *mut *mut Error) -> Status;
-    skippy_model_info_tensor_count(info: *mut ModelInfo, out_count: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_model_info_tensor_at(info: *mut ModelInfo, index: usize, out_tensor: *mut TensorInfo, out_error: *mut *mut Error) -> Status;
-    skippy_write_gguf_metadata_from_parts(input_paths: *const *const c_char, input_count: usize, output_path: *const c_char, out_error: *mut *mut Error) -> Status;
-    skippy_write_gguf_from_parts(input_paths: *const *const c_char, input_count: usize, output_path: *const c_char, out_error: *mut *mut Error) -> Status;
-    skippy_write_gguf_from_parts_consuming(input_paths: *const *const c_char, input_count: usize, output_path: *const c_char, out_error: *mut *mut Error) -> Status;
-    skippy_stage_planner_create_v1(config: *const StagePlannerConfigV1, out_planner: *mut *mut StagePlanner, out_error: *mut *mut Error) -> Status;
-    skippy_stage_planner_free(planner: *mut StagePlanner);
-    skippy_stage_planner_realize_v1(planner: *const StagePlanner, layer_start: i32, layer_end: i32, out_plan: *mut *mut StagePlan, out_error: *mut *mut Error) -> Status;
-    skippy_stage_plan_free(plan: *mut StagePlan);
-    skippy_stage_plan_describe_v1(plan: *const StagePlan, out_desc: *mut StagePlanDescV1, out_error: *mut *mut Error) -> Status;
-    skippy_stage_plan_profile_at_v1(plan: *const StagePlan, index: usize, out_desc: *mut StagePlanProfileDescV1, out_error: *mut *mut Error) -> Status;
-    skippy_stage_plan_resident_tensor_at_v1(plan: *const StagePlan, index: usize, out_desc: *mut StagePlanValueDescV1, out_error: *mut *mut Error) -> Status;
-    skippy_stage_plan_value_at_v1(plan: *const StagePlan, profile_index: usize, kind: StagePlanValueKind, index: usize, out_desc: *mut StagePlanValueDescV1, out_error: *mut *mut Error) -> Status;
-    skippy_stage_plan_state_at_v1(plan: *const StagePlan, profile_index: usize, index: usize, out_desc: *mut StagePlanStateDescV1, out_error: *mut *mut Error) -> Status;
-    skippy_stage_plan_string_v1(plan: *const StagePlan, reference: StagePlanStringRefV1, out_data: *mut *const c_char, out_length: *mut usize, out_error: *mut *mut Error) -> Status;
-    skippy_stage_plan_validate_chain_v1(plans: *const *const StagePlan, plan_count: usize, out_error: *mut *mut Error) -> Status;
-    mtmd_default_marker() -> *const c_char;
-    mtmd_helper_log_set(log_callback: LlamaLogCallback, user_data: *mut c_void);
-    mtmd_context_params_default() -> MtmdContextParams;
-    mtmd_gen_audio_get_info(ctx: *const MtmdContext) -> MtmdGenAudioInfo;
-    mtmd_helper_gen_audio_init(lctx: *mut Opaque, mctx: *mut MtmdContext) -> *mut MtmdHelperGenAudio;
-    mtmd_helper_gen_audio_free(ctx: *mut MtmdHelperGenAudio);
-    mtmd_helper_gen_audio_reset(ctx: *mut MtmdHelperGenAudio);
-    mtmd_helper_gen_audio_set_input(ctx: *mut MtmdHelperGenAudio, input: *const MtmdHelperGenAudioInput) -> i32;
-    mtmd_helper_gen_audio_step_prompt(ctx: *mut MtmdHelperGenAudio, n_batch: i32) -> i32;
-    mtmd_helper_gen_audio_step_gen(ctx: *mut MtmdHelperGenAudio, sampled: i32, h_state_in: *const f32, h_state_out: *mut *const f32, out_stop: *mut bool) -> i32;
-    mtmd_helper_gen_audio_get_output(ctx: *mut MtmdHelperGenAudio, out_sample_rate: *mut i32, out_data: *mut *const c_char, out_data_len: *mut usize, out_n_samples: *mut i64) -> i32;
-    mtmd_init_from_file(mmproj_fname: *const c_char, text_model: *const Opaque, ctx_params: MtmdContextParams) -> *mut MtmdContext;
-    mtmd_free(ctx: *mut MtmdContext);
-    mtmd_helper_init_opt_default() -> MtmdHelperInitOpt;
-    mtmd_helper_bitmap_init_from_buf(ctx: *mut MtmdContext, buf: *const u8, len: usize, placeholder: bool, opt: MtmdHelperInitOpt) -> MtmdHelperBitmapWrapper;
-    mtmd_helper_video_free(video: *mut MtmdHelperVideo);
-    mtmd_bitmap_free(bitmap: *mut MtmdBitmap);
-    mtmd_bitmap_get_n_bytes(bitmap: *const MtmdBitmap) -> usize;
-    mtmd_input_chunks_init() -> *mut MtmdInputChunks;
-    mtmd_input_chunks_free(chunks: *mut MtmdInputChunks);
-    mtmd_tokenize(ctx: *mut MtmdContext, output: *mut MtmdInputChunks, text: *const MtmdInputText, bitmaps: *const *const MtmdBitmap, n_bitmaps: usize) -> c_int;
-    mtmd_helper_get_n_tokens(chunks: *const MtmdInputChunks) -> usize;
-    mtmd_helper_get_n_pos(chunks: *const MtmdInputChunks) -> i32;
-    mtmd_input_chunks_size(chunks: *const MtmdInputChunks) -> usize;
-    mtmd_input_chunks_get(chunks: *const MtmdInputChunks, index: usize) -> *const Opaque;
-    mtmd_decode_use_mrope(ctx: *const MtmdContext) -> bool;
-    mtmd_input_chunk_get_type(chunk: *const Opaque) -> MtmdInputChunkType;
-    mtmd_input_chunk_get_n_tokens(chunk: *const Opaque) -> usize;
-    mtmd_input_chunk_get_tokens_text(chunk: *const Opaque, out_count: *mut usize) -> *const i32;
-    mtmd_input_chunk_get_tokens_image(chunk: *const Opaque) -> *const Opaque;
-    mtmd_helper_image_get_decoder_pos(image: *const Opaque, pos_0: i32, out_pos: *mut MtmdDecoderPos);
-    mtmd_helper_eval_chunks(ctx: *mut MtmdContext, lctx: *mut Opaque, chunks: *const MtmdInputChunks, n_past: i32, seq_id: i32, n_batch: i32, logits_last: bool, new_n_past: *mut i32) -> c_int;
-    mtmd_helper_eval_chunk_single(ctx: *mut MtmdContext, lctx: *mut Opaque, chunk: *const Opaque, n_past: i32, seq_id: i32, n_batch: i32, logits_last: bool, new_n_past: *mut i32) -> c_int;
-    mtmd_helper_eval_chunk_single_with_callback(ctx: *mut MtmdContext, lctx: *mut Opaque, chunk: *const Opaque, n_past: i32, seq_id: i32, n_batch: i32, logits_last: bool, new_n_past: *mut i32, callback: Option<unsafe extern "C" fn(i32, *mut c_void) -> c_int>, user_data: *mut c_void) -> c_int;
+    llama {
+        llama_get_embeddings_ith(ctx: *mut Opaque, index: i32) -> *mut f32;
+        llama_set_embeddings(ctx: *mut Opaque, embeddings: bool);
+        llama_model_get_vocab(model: *const Opaque) -> *const Opaque;
+        llama_vocab_n_tokens(vocab: *const Opaque) -> i32;
+        llama_log_set(log_callback: LlamaLogCallback, user_data: *mut c_void);
+        ggml_log_set(log_callback: LlamaLogCallback, user_data: *mut c_void);
+        llama_model_quantize_default_params() -> LlamaModelQuantizeParams;
+        llama_model_quantize(fname_inp: *const c_char, fname_out: *const c_char, params: *const LlamaModelQuantizeParams) -> u32;
+    }
+    skippy {
+        skippy_error_free(error: *mut Error);
+        skippy_ngram_cache_create(ngram_min: u16, ngram_max: u16, out_cache: *mut *mut NgramCache, out_error: *mut *mut Error) -> Status;
+        skippy_ngram_cache_free(cache: *mut NgramCache);
+        skippy_ngram_cache_reset(cache: *mut NgramCache, token_ids: *const i32, token_count: usize, out_error: *mut *mut Error) -> Status;
+        skippy_ngram_cache_append(cache: *mut NgramCache, token_ids: *const i32, token_count: usize, out_error: *mut *mut Error) -> Status;
+        skippy_ngram_cache_draft(cache: *mut NgramCache, continuation_prefix: *const i32, continuation_prefix_count: usize, max_draft_tokens: u16, output_tokens: *mut i32, output_token_capacity: usize, out_token_count: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_backend_device_count(out_count: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_backend_device_at(index: usize, out_device: *mut BackendDevice, out_error: *mut *mut Error) -> Status;
+        skippy_model_open(path: *const c_char, config: *const RuntimeConfig, out_model: *mut *mut Model, out_error: *mut *mut Error) -> Status;
+        skippy_model_open_from_parts(paths: *const *const c_char, path_count: usize, config: *const RuntimeConfig, out_model: *mut *mut Model, out_error: *mut *mut Error) -> Status;
+        skippy_model_open_from_source(metadata_gguf: *const c_void, metadata_gguf_size: usize, source: *const ModelTensorSourceV1, quantization_ftype: i32, config: *const RuntimeConfig, out_model: *mut *mut Model, out_error: *mut *mut Error) -> Status;
+        skippy_model_free(model: *mut Model, out_error: *mut *mut Error) -> Status;
+        skippy_model_llama_model(model: *const Model) -> *const Opaque;
+        skippy_model_output_activation_boundary(model: *const Model, out_desc: *mut ActivationBoundaryDesc) -> bool;
+        skippy_model_input_activation_boundary(model: *const Model, out_desc: *mut ActivationBoundaryDesc) -> bool;
+        skippy_system_one_canvas_length(model: *mut Model, out_canvas_token_count: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_system_one_read(model: *mut Model, prompt_tokens: *const i32, prompt_token_count: usize, canvas_tokens: *const i32, canvas_token_count: usize, label_token_ids: *const i32, label_token_count: usize, slots: *const SystemOneSlot, slot_count: usize, out_probabilities: *mut f32, output_capacity: usize, out_output_count: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_model_workload_info_v1(model: *const Model, out_info: *mut WorkloadInfoV1, out_error: *mut *mut Error) -> Status;
+        skippy_model_supports_causal_readout(model: *const Model) -> bool;
+        skippy_laya_model_open(model_path: *const c_char, n_threads: i32, device: *const c_char, out_model: *mut *mut LayaModel, out_error: *mut *mut Error) -> Status;
+        skippy_laya_model_free(model: *mut LayaModel);
+        skippy_clef_model_open(model_path: *const c_char, n_ctx: i32, n_threads: i32, n_gpu_layers: i32, out_model: *mut *mut ClefModel, out_error: *mut *mut Error) -> Status;
+        skippy_clef_model_free(model: *mut ClefModel);
+        skippy_clef_model_info_v1(model: *const ClefModel, out_info: *mut ClefInfoV1, out_error: *mut *mut Error) -> Status;
+        skippy_clef_model_decision_metadata(model: *const ClefModel, index: u32, out_key: *mut c_char, key_capacity: usize, out_value: *mut c_char, value_capacity: usize, out_error: *mut *mut Error) -> Status;
+        skippy_clef_plan(model: *const ClefModel, request_json: *const c_char, request_len: usize, out_tokens: *mut i32, out_orders: *mut i32, capacity: usize, out_token_count: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_clef_read(model: *mut ClefModel, request_json: *const c_char, request_len: usize, out_scores: *mut f32, capacity: usize, out_score_count: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_laya_model_memory_v1(model: *mut LayaModel, out_info: *mut LayaMemoryV1, out_error: *mut *mut Error) -> Status;
+        skippy_laya_model_info_v1(model: *const LayaModel, out_info: *mut LayaInfoV1, out_error: *mut *mut Error) -> Status;
+        skippy_laya_tokenize(model: *const LayaModel, text: *const c_char, text_len: usize, out_tokens: *mut i32, capacity: usize, out_token_count: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_laya_read(model: *mut LayaModel, tokens: *const i32, token_count: usize, marker_positions: *const i32, marker_count: usize, sequences: *const LayaSequence, sequence_count: usize, out_logits: *mut f32, logits_capacity: usize, out_act_logits: *mut f32, act_logits_capacity: usize, out_error: *mut *mut Error) -> Status;
+        skippy_asr_model_open(model_path: *const c_char, device: *const c_char, out_model: *mut *mut AsrModel, out_error: *mut *mut Error) -> Status;
+        skippy_asr_model_free(model: *mut AsrModel);
+        skippy_asr_model_info_v1(model: *const AsrModel, out_info: *mut AsrInfoV1, out_error: *mut *mut Error) -> Status;
+        skippy_asr_decode_audio(data: *const u8, len: usize, out_samples: *mut *mut f32, out_sample_count: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_asr_samples_free(samples: *mut f32);
+        skippy_asr_transcribe(model: *mut AsrModel, samples: *const f32, sample_count: usize, params: *const AsrTranscribeParamsV1, abort_callback: AsrAbortCallback, abort_user_data: *mut c_void, out_result: *mut *mut AsrResult, out_error: *mut *mut Error) -> Status;
+        skippy_asr_result_segment_count(result: *const AsrResult) -> usize;
+        skippy_asr_result_segment_v1(result: *const AsrResult, index: usize, out_segment: *mut AsrSegmentV1, out_error: *mut *mut Error) -> Status;
+        skippy_asr_result_language(result: *const AsrResult) -> *const c_char;
+        skippy_asr_result_duration_seconds(result: *const AsrResult) -> f64;
+        skippy_asr_result_free(result: *mut AsrResult);
+        skippy_session_create(model: *mut Model, out_session: *mut *mut Session, out_error: *mut *mut Error) -> Status;
+        skippy_session_create_from_resident_prefix(model: *mut Model, cache_seq_id: i32, token_ids: *const i32, token_count: usize, out_session: *mut *mut Session, out_error: *mut *mut Error) -> Status;
+        skippy_session_llama_context(session: *mut Session) -> *mut Opaque;
+        skippy_session_position(session: *const Session) -> i32;
+        skippy_session_batch_size(session: *const Session) -> i32;
+        skippy_session_sequence_id(session: *const Session) -> i32;
+        skippy_session_begin_external_decode(session: *mut Session, out_error: *mut *mut Error) -> Status;
+        skippy_session_end_external_decode(session: *mut Session, out_error: *mut *mut Error) -> Status;
+        skippy_session_set_position(session: *mut Session, n_past: i32, out_error: *mut *mut Error) -> Status;
+        skippy_session_restore_token_history(session: *mut Session, token_ids: *const i32, token_count: usize, out_error: *mut *mut Error) -> Status;
+        skippy_session_sample_current(session: *mut Session, sampling: *const SamplingConfig, out_predicted_token: *mut i32, out_error: *mut *mut Error) -> Status;
+        skippy_session_configure_chat_sampling(session: *mut Session, sampling: *const SamplingConfig, metadata_json: *const c_char, prompt_token_count: u64, out_error: *mut *mut Error) -> Status;
+        skippy_session_embed(session: *mut Session, token_ids: *const i32, token_count: usize, output: *mut f32, output_capacity: usize, out_dimensions: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_session_rerank(session: *mut Session, query: *const c_char, document: *const c_char, out_score: *mut f32, out_token_count: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_session_encode_prompt(session: *mut Session, token_ids: *const i32, token_count: usize, out_decoder_start_token: *mut i32, out_error: *mut *mut Error) -> Status;
+        skippy_session_reset(session: *mut Session, out_error: *mut *mut Error) -> Status;
+        skippy_session_free(session: *mut Session, out_error: *mut *mut Error) -> Status;
+        skippy_prefill_chunk(session: *mut Session, token_ids: *const i32, token_count: usize, input_activations: *const c_void, input_activation_bytes: usize, output_activations: *mut c_void, output_activation_capacity: usize, out_output_activation_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_verify_tokens(session: *mut Session, token_ids: *const i32, token_count: usize, output_tokens: *mut i32, output_token_capacity: usize, out_token_count: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_decode_step_sampled(session: *mut Session, token_id: i32, sampling: *const SamplingConfig, input_activation: *const c_void, input_activation_bytes: usize, output_activation: *mut c_void, output_activation_capacity: usize, out_output_activation_bytes: *mut usize, out_predicted_token: *mut i32, out_error: *mut *mut Error) -> Status;
+        skippy_decode_batch_sampled(sessions: *const *mut Session, token_ids: *const i32, sampling: *const *const SamplingConfig, request_count: usize, out_predicted_tokens: *mut i32, predicted_token_capacity: usize, out_error: *mut *mut Error) -> Status;
+        skippy_iteration_batch_sampled(requests: *const IterationRequest, request_count: usize, output_descs: *mut ActivationDesc, output_payloads: *const *mut c_void, output_payload_capacities: *const usize, out_output_payload_bytes: *mut usize, out_sampled_request_indexes: *mut usize, out_predicted_tokens: *mut i32, sampled_output_capacity: usize, out_sampled_output_count: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_prefill_chunk_frame(session: *mut Session, token_ids: *const i32, token_count: usize, input_desc: *const ActivationDesc, input_payload: *const c_void, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_prefill_chunk_frame_sampled(session: *mut Session, token_ids: *const i32, token_count: usize, sampling: *const SamplingConfig, input_desc: *const ActivationDesc, input_payload: *const c_void, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, out_predicted_token: *mut i32, out_error: *mut *mut Error) -> Status;
+        skippy_prefill_chunk_frame_with_positions(session: *mut Session, token_ids: *const i32, token_count: usize, positions: *const i32, position_count: usize, input_desc: *const ActivationDesc, input_payload: *const c_void, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_prefill_chunk_frame_sampled_with_positions(session: *mut Session, token_ids: *const i32, token_count: usize, positions: *const i32, position_count: usize, sampling: *const SamplingConfig, input_desc: *const ActivationDesc, input_payload: *const c_void, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, out_predicted_token: *mut i32, out_error: *mut *mut Error) -> Status;
+        skippy_decode_step_frame_sampled(session: *mut Session, token_id: i32, sampling: *const SamplingConfig, input_desc: *const ActivationDesc, input_payload: *const c_void, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, out_predicted_token: *mut i32, out_error: *mut *mut Error) -> Status;
+        skippy_decode_step_frame_sampled_mtp(session: *mut Session, token_id: i32, sampling: *const SamplingConfig, input_desc: *const ActivationDesc, input_payload: *const c_void, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, out_predicted_token: *mut i32, max_draft_tokens: usize, out_mtp_draft: *mut NativeMtpDraft, out_error: *mut *mut Error) -> Status;
+        skippy_decode_step_frame_batch_sampled(sessions: *const *mut Session, token_ids: *const i32, sampling: *const *const SamplingConfig, input_descs: *const *const ActivationDesc, input_payloads: *const *const c_void, output_descs: *mut ActivationDesc, output_payloads: *const *mut c_void, output_payload_capacities: *const usize, out_output_payload_bytes: *mut usize, out_predicted_tokens: *mut i32, predicted_token_capacity: usize, request_count: usize, out_error: *mut *mut Error) -> Status;
+        skippy_verify_tokens_frame_sampled(session: *mut Session, token_ids: *const i32, token_count: usize, sampling: *const SamplingConfig, input_desc: *const ActivationDesc, input_payload: *const c_void, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, output_tokens: *mut i32, output_token_capacity: usize, out_token_count: *mut usize, max_draft_tokens: usize, out_mtp_draft: *mut NativeMtpDraft, out_error: *mut *mut Error) -> Status;
+        skippy_session_copy_output_activation_frame(session: *mut Session, token_count: usize, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_session_last_token_signal(session: *mut Session, out_signal: *mut TokenSignal, out_error: *mut *mut Error) -> Status;
+        skippy_session_take_token_logprobs(session: *mut Session, out_entries: *mut TokenLogprobs, capacity: usize, out_count: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_session_signal_window(session: *mut Session, window_tokens: u32, out_window: *mut GenerationSignalWindow, out_error: *mut *mut Error) -> Status;
+        skippy_trim_session(session: *mut Session, token_count: u64, out_error: *mut *mut Error) -> Status;
+        skippy_retire_verify_checkpoint(session: *mut Session, token_start: u64, token_count: u64, out_error: *mut *mut Error) -> Status;
+        skippy_session_verify_rollback_counts(session: *const Session, out_in_place: *mut u64, out_checkpointed: *mut u64, out_error: *mut *mut Error) -> Status;
+        skippy_export_state(session: *mut Session, layer_start: i32, layer_end: i32, output: *mut c_void, output_capacity: usize, out_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_import_state(session: *mut Session, layer_start: i32, layer_end: i32, input: *const c_void, input_bytes: usize, out_error: *mut *mut Error) -> Status;
+        skippy_export_full_state(session: *mut Session, layer_start: i32, layer_end: i32, output: *mut c_void, output_capacity: usize, out_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_import_full_state(session: *mut Session, layer_start: i32, layer_end: i32, input: *const c_void, input_bytes: usize, out_error: *mut *mut Error) -> Status;
+        skippy_export_kv_page(session: *mut Session, layer_start: i32, layer_end: i32, token_start: u64, token_count: u64, out_desc: *mut KvPageDesc, output: *mut c_void, output_capacity: usize, out_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_import_kv_page(session: *mut Session, desc: *const KvPageDesc, input: *const c_void, input_bytes: usize, out_error: *mut *mut Error) -> Status;
+        skippy_import_cachegen_kv_page_v1(session: *mut Session, desc: *const KvPageDesc, records: *const CacheGenRecordV1, record_count: usize, out_error: *mut *mut Error) -> Status;
+        skippy_model_memory_cache_capabilities(model: *const Model) -> u32;
+        skippy_export_recurrent_state(session: *mut Session, output: *mut c_void, output_capacity: usize, out_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_import_recurrent_state(session: *mut Session, input: *const c_void, input_bytes: usize, out_error: *mut *mut Error) -> Status;
+        skippy_session_save_prefix(session: *mut Session, cache_seq_id: i32, token_count: u64, out_error: *mut *mut Error) -> Status;
+        skippy_session_restore_prefix(session: *mut Session, cache_seq_id: i32, token_ids: *const i32, token_count: usize, out_error: *mut *mut Error) -> Status;
+        skippy_session_memory_used_cells(session: *mut Session, out_used_cells: *mut u64, out_error: *mut *mut Error) -> Status;
+        skippy_session_drop_sequence(session: *mut Session, seq_id: i32, out_error: *mut *mut Error) -> Status;
+        skippy_tokenize(model: *mut Model, text: *const c_char, add_special: bool, output_tokens: *mut i32, output_token_capacity: usize, out_token_count: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_detokenize(model: *mut Model, tokens: *const i32, token_count: usize, output_text: *mut c_char, output_text_capacity: usize, out_text_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_token_is_eog(model: *mut Model, token_id: i32, out_is_eog: *mut bool, out_error: *mut *mut Error) -> Status;
+        skippy_model_info_open(path: *const c_char, out_info: *mut *mut ModelInfo, out_error: *mut *mut Error) -> Status;
+        skippy_model_info_free(info: *mut ModelInfo, out_error: *mut *mut Error) -> Status;
+        skippy_model_info_tensor_count(info: *mut ModelInfo, out_count: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_model_info_tensor_at(info: *mut ModelInfo, index: usize, out_tensor: *mut TensorInfo, out_error: *mut *mut Error) -> Status;
+        skippy_write_gguf_metadata_from_parts(input_paths: *const *const c_char, input_count: usize, output_path: *const c_char, out_error: *mut *mut Error) -> Status;
+        skippy_write_gguf_from_parts(input_paths: *const *const c_char, input_count: usize, output_path: *const c_char, out_error: *mut *mut Error) -> Status;
+        skippy_write_gguf_from_parts_consuming(input_paths: *const *const c_char, input_count: usize, output_path: *const c_char, out_error: *mut *mut Error) -> Status;
+        skippy_stage_planner_create_v1(config: *const StagePlannerConfigV1, out_planner: *mut *mut StagePlanner, out_error: *mut *mut Error) -> Status;
+        skippy_stage_planner_free(planner: *mut StagePlanner);
+        skippy_stage_planner_realize_v1(planner: *const StagePlanner, layer_start: i32, layer_end: i32, out_plan: *mut *mut StagePlan, out_error: *mut *mut Error) -> Status;
+        skippy_stage_plan_free(plan: *mut StagePlan);
+        skippy_stage_plan_describe_v1(plan: *const StagePlan, out_desc: *mut StagePlanDescV1, out_error: *mut *mut Error) -> Status;
+        skippy_stage_plan_profile_at_v1(plan: *const StagePlan, index: usize, out_desc: *mut StagePlanProfileDescV1, out_error: *mut *mut Error) -> Status;
+        skippy_stage_plan_resident_tensor_at_v1(plan: *const StagePlan, index: usize, out_desc: *mut StagePlanValueDescV1, out_error: *mut *mut Error) -> Status;
+        skippy_stage_plan_value_at_v1(plan: *const StagePlan, profile_index: usize, kind: StagePlanValueKind, index: usize, out_desc: *mut StagePlanValueDescV1, out_error: *mut *mut Error) -> Status;
+        skippy_stage_plan_state_at_v1(plan: *const StagePlan, profile_index: usize, index: usize, out_desc: *mut StagePlanStateDescV1, out_error: *mut *mut Error) -> Status;
+        skippy_stage_plan_string_v1(plan: *const StagePlan, reference: StagePlanStringRefV1, out_data: *mut *const c_char, out_length: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_stage_plan_validate_chain_v1(plans: *const *const StagePlan, plan_count: usize, out_error: *mut *mut Error) -> Status;
+    }
+    mtmd {
+        mtmd_default_marker() -> *const c_char;
+        mtmd_helper_log_set(log_callback: LlamaLogCallback, user_data: *mut c_void);
+        mtmd_context_params_default() -> MtmdContextParams;
+        mtmd_gen_audio_get_info(ctx: *const MtmdContext) -> MtmdGenAudioInfo;
+        mtmd_helper_gen_audio_init(lctx: *mut Opaque, mctx: *mut MtmdContext) -> *mut MtmdHelperGenAudio;
+        mtmd_helper_gen_audio_free(ctx: *mut MtmdHelperGenAudio);
+        mtmd_helper_gen_audio_reset(ctx: *mut MtmdHelperGenAudio);
+        mtmd_helper_gen_audio_set_input(ctx: *mut MtmdHelperGenAudio, input: *const MtmdHelperGenAudioInput) -> i32;
+        mtmd_helper_gen_audio_step_prompt(ctx: *mut MtmdHelperGenAudio, n_batch: i32) -> i32;
+        mtmd_helper_gen_audio_step_gen(ctx: *mut MtmdHelperGenAudio, sampled: i32, h_state_in: *const f32, h_state_out: *mut *const f32, out_stop: *mut bool) -> i32;
+        mtmd_helper_gen_audio_get_output(ctx: *mut MtmdHelperGenAudio, out_sample_rate: *mut i32, out_data: *mut *const c_char, out_data_len: *mut usize, out_n_samples: *mut i64) -> i32;
+        mtmd_init_from_file(mmproj_fname: *const c_char, text_model: *const Opaque, ctx_params: MtmdContextParams) -> *mut MtmdContext;
+        mtmd_free(ctx: *mut MtmdContext);
+        mtmd_helper_init_opt_default() -> MtmdHelperInitOpt;
+        mtmd_helper_bitmap_init_from_buf(ctx: *const MtmdContext, buf: *const u8, len: usize, placeholder: bool, opt: MtmdHelperInitOpt) -> MtmdHelperBitmapWrapper;
+        mtmd_helper_video_free(video: *mut MtmdHelperVideo);
+        mtmd_bitmap_free(bitmap: *mut MtmdBitmap);
+        mtmd_bitmap_get_n_bytes(bitmap: *const MtmdBitmap) -> usize;
+        mtmd_input_chunks_init() -> *mut MtmdInputChunks;
+        mtmd_input_chunks_free(chunks: *mut MtmdInputChunks);
+        mtmd_tokenize(ctx: *const MtmdContext, output: *mut MtmdInputChunks, text: *const MtmdInputText, bitmaps: *const *const MtmdBitmap, n_bitmaps: usize) -> c_int;
+        mtmd_helper_get_n_tokens(chunks: *const MtmdInputChunks) -> usize;
+        mtmd_helper_get_n_pos(chunks: *const MtmdInputChunks) -> i32;
+        mtmd_input_chunks_size(chunks: *const MtmdInputChunks) -> usize;
+        mtmd_input_chunks_get(chunks: *const MtmdInputChunks, index: usize) -> *const Opaque;
+        mtmd_decode_use_mrope(ctx: *const MtmdContext) -> bool;
+        mtmd_input_chunk_get_type(chunk: *const Opaque) -> MtmdInputChunkType;
+        mtmd_input_chunk_get_n_tokens(chunk: *const Opaque) -> usize;
+        mtmd_input_chunk_get_tokens_text(chunk: *const Opaque, out_count: *mut usize) -> *const i32;
+        mtmd_input_chunk_get_tokens_image(chunk: *const Opaque) -> *const Opaque;
+        mtmd_helper_image_get_decoder_pos(image: *const Opaque, pos_0: i32, out_pos: *mut MtmdDecoderPos);
+        mtmd_helper_eval_chunks(ctx: *mut MtmdContext, lctx: *mut Opaque, chunks: *const MtmdInputChunks, n_past: i32, seq_id: i32, n_batch: i32, logits_last: bool, new_n_past: *mut i32) -> c_int;
+        mtmd_helper_eval_chunk_single(ctx: *mut MtmdContext, lctx: *mut Opaque, chunk: *const Opaque, n_past: i32, seq_id: i32, n_batch: i32, logits_last: bool, new_n_past: *mut i32) -> c_int;
+        mtmd_helper_eval_chunk_single_with_callback(ctx: *mut MtmdContext, lctx: *mut Opaque, chunk: *const Opaque, n_past: i32, seq_id: i32, n_batch: i32, logits_last: bool, new_n_past: *mut i32, callback: Option<unsafe extern "C" fn(i32, *mut c_void) -> c_int>, user_data: *mut c_void) -> c_int;
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -421,6 +448,27 @@ pub fn symbol_present(name: &[u8]) -> bool {
     symbols().symbol_exists(name)
 }
 
+/// Looks up the optional C symbol `$name` as `$facade` after checking that
+/// type against the generated `$module::$name` declaration at compile time.
+/// Each `_` stands for one native parameter.
+macro_rules! optional_symbol {
+    ($module:ident::$name:ident($($parameter:tt),*) as $facade:ty) => {{
+        signature_check::check_signature!($module::$name($($parameter),*) as $facade);
+        symbols().lookup_optional::<$facade>(concat!(stringify!($name), "\0").as_bytes())
+    }};
+}
+
+/// Looks up the C-linkage `llama.h` symbol `$name` for the [`LlamaDraftApi`]
+/// field `$field` after checking the field's type against the generated
+/// declaration at compile time. Each `_` stands for one native parameter.
+#[cfg(not(windows))]
+macro_rules! draft_api_symbol {
+    ($symbols:ident, $field:ident: $name:ident($($parameter:tt),*)) => {{
+        signature_check::check_draft_api_field!($field: $name($($parameter),*));
+        $symbols.lookup_optional(concat!(stringify!($name), "\0").as_bytes())
+    }};
+}
+
 type SkippySetRuntimeEventReporterFn =
     unsafe extern "C" fn(reporter: *const SkippyRuntimeEventReporterV1) -> Status;
 type SkippyClearRuntimeEventReporterFn = unsafe extern "C" fn();
@@ -428,8 +476,8 @@ type SkippyClearRuntimeEventReporterFn = unsafe extern "C" fn();
 pub fn skippy_set_runtime_event_reporter_fn() -> Option<SkippySetRuntimeEventReporterFn> {
     static CACHE: OnceLock<Option<SkippySetRuntimeEventReporterFn>> = OnceLock::new();
     *CACHE.get_or_init(|| {
-        symbols().lookup_optional::<SkippySetRuntimeEventReporterFn>(
-            b"skippy_set_runtime_event_reporter\0",
+        optional_symbol!(
+            skippy::skippy_set_runtime_event_reporter(_) as SkippySetRuntimeEventReporterFn
         )
     })
 }
@@ -437,43 +485,37 @@ pub fn skippy_set_runtime_event_reporter_fn() -> Option<SkippySetRuntimeEventRep
 pub fn skippy_clear_runtime_event_reporter_fn() -> Option<SkippyClearRuntimeEventReporterFn> {
     static CACHE: OnceLock<Option<SkippyClearRuntimeEventReporterFn>> = OnceLock::new();
     *CACHE.get_or_init(|| {
-        symbols().lookup_optional::<SkippyClearRuntimeEventReporterFn>(
-            b"skippy_clear_runtime_event_reporter\0",
+        optional_symbol!(
+            skippy::skippy_clear_runtime_event_reporter() as SkippyClearRuntimeEventReporterFn
         )
     })
 }
 
 pub fn skippy_abi_features_optional() -> Option<SkippyAbiFeaturesFn> {
     static CACHE: OnceLock<Option<SkippyAbiFeaturesFn>> = OnceLock::new();
-    *CACHE
-        .get_or_init(|| symbols().lookup_optional::<SkippyAbiFeaturesFn>(b"skippy_abi_features\0"))
+    *CACHE.get_or_init(|| optional_symbol!(skippy::skippy_abi_features() as SkippyAbiFeaturesFn))
 }
 
 /// Graph reuse counters. Optional: a runtime that predates this symbol must
 /// still load, since the counters are telemetry and never a correctness input.
 pub fn llama_perf_context_optional() -> Option<LlamaPerfContextFn> {
     static CACHE: OnceLock<Option<LlamaPerfContextFn>> = OnceLock::new();
-    *CACHE.get_or_init(|| symbols().lookup_optional::<LlamaPerfContextFn>(b"llama_perf_context\0"))
+    *CACHE.get_or_init(|| optional_symbol!(llama::llama_perf_context(_) as LlamaPerfContextFn))
 }
 
 pub(crate) fn llama_model_is_recurrent_fn() -> Option<LlamaModelStateFn> {
     static CACHE: OnceLock<Option<LlamaModelStateFn>> = OnceLock::new();
-    *CACHE.get_or_init(|| {
-        symbols().lookup_optional::<LlamaModelStateFn>(b"llama_model_is_recurrent\0")
-    })
+    *CACHE.get_or_init(|| optional_symbol!(llama::llama_model_is_recurrent(_) as LlamaModelStateFn))
 }
 
 pub(crate) fn llama_model_is_hybrid_fn() -> Option<LlamaModelStateFn> {
     static CACHE: OnceLock<Option<LlamaModelStateFn>> = OnceLock::new();
-    *CACHE
-        .get_or_init(|| symbols().lookup_optional::<LlamaModelStateFn>(b"llama_model_is_hybrid\0"))
+    *CACHE.get_or_init(|| optional_symbol!(llama::llama_model_is_hybrid(_) as LlamaModelStateFn))
 }
 
 pub(crate) fn llama_model_is_diffusion_fn() -> Option<LlamaModelStateFn> {
     static CACHE: OnceLock<Option<LlamaModelStateFn>> = OnceLock::new();
-    *CACHE.get_or_init(|| {
-        symbols().lookup_optional::<LlamaModelStateFn>(b"llama_model_is_diffusion\0")
-    })
+    *CACHE.get_or_init(|| optional_symbol!(llama::llama_model_is_diffusion(_) as LlamaModelStateFn))
 }
 
 type LlamaModelMetaValStrFn = unsafe extern "C" fn(
@@ -486,7 +528,7 @@ type LlamaModelMetaValStrFn = unsafe extern "C" fn(
 pub(crate) fn llama_model_meta_val_str_fn() -> Option<LlamaModelMetaValStrFn> {
     static CACHE: OnceLock<Option<LlamaModelMetaValStrFn>> = OnceLock::new();
     *CACHE.get_or_init(|| {
-        symbols().lookup_optional::<LlamaModelMetaValStrFn>(b"llama_model_meta_val_str\0")
+        optional_symbol!(llama::llama_model_meta_val_str(_, _, _, _) as LlamaModelMetaValStrFn)
     })
 }
 
@@ -505,9 +547,12 @@ pub(crate) fn llama_draft_api() -> Option<&'static LlamaDraftApi> {
 /// Upstream draft-context entry points. Optional as a set: a runtime that does
 /// not export every one of them cannot host an external draft context.
 ///
-/// The `src/llama-ext.h` entry points keep C++ linkage, so they resolve by
-/// their Itanium-mangled names; the mangling encodes the parameter types, so
-/// an upstream signature change fails lookup instead of miscalling.
+/// The C-linkage `llama.h` entry points are checked against the generated
+/// bindings at compile time. The `src/llama-ext.h` entry points keep C++
+/// linkage, so they resolve by their Itanium-mangled names and have no
+/// generated declarations. The mangling encodes the parameter types, so a
+/// parameter change fails lookup instead of miscalling; it does not encode
+/// the return type, so their hand-written return types are unchecked.
 #[cfg(not(windows))]
 pub(crate) fn llama_draft_api() -> Option<&'static LlamaDraftApi> {
     static CACHE: OnceLock<Option<LlamaDraftApi>> = OnceLock::new();
@@ -515,28 +560,57 @@ pub(crate) fn llama_draft_api() -> Option<&'static LlamaDraftApi> {
         .get_or_init(|| {
             let symbols = symbols();
             Some(LlamaDraftApi {
-                model_default_params: symbols.lookup_optional(b"llama_model_default_params\0")?,
-                context_default_params: symbols
-                    .lookup_optional(b"llama_context_default_params\0")?,
-                model_load_from_file: symbols.lookup_optional(b"llama_model_load_from_file\0")?,
-                model_free: symbols.lookup_optional(b"llama_model_free\0")?,
-                init_from_model: symbols.lookup_optional(b"llama_init_from_model\0")?,
-                free: symbols.lookup_optional(b"llama_free\0")?,
-                decode: symbols.lookup_optional(b"llama_decode\0")?,
-                get_model: symbols.lookup_optional(b"llama_get_model\0")?,
-                get_memory: symbols.lookup_optional(b"llama_get_memory\0")?,
-                memory_seq_rm: symbols.lookup_optional(b"llama_memory_seq_rm\0")?,
-                get_logits_ith: symbols.lookup_optional(b"llama_get_logits_ith\0")?,
-                n_ctx: symbols.lookup_optional(b"llama_n_ctx\0")?,
-                n_batch: symbols.lookup_optional(b"llama_n_batch\0")?,
-                n_ubatch: symbols.lookup_optional(b"llama_n_ubatch\0")?,
-                model_n_embd: symbols.lookup_optional(b"llama_model_n_embd\0")?,
-                model_n_layer: symbols.lookup_optional(b"llama_model_n_layer\0")?,
-                model_rope_type: symbols.lookup_optional(b"llama_model_rope_type\0")?,
-                model_get_vocab: symbols.lookup_optional(b"llama_model_get_vocab\0")?,
-                vocab_n_tokens: symbols.lookup_optional(b"llama_vocab_n_tokens\0")?,
-                vocab_mask: symbols.lookup_optional(b"llama_vocab_mask\0")?,
-                set_causal_attn: symbols.lookup_optional(b"llama_set_causal_attn\0")?,
+                model_default_params: draft_api_symbol!(
+                    symbols,
+                    model_default_params: llama_model_default_params()
+                )?,
+                context_default_params: draft_api_symbol!(
+                    symbols,
+                    context_default_params: llama_context_default_params()
+                )?,
+                model_load_from_file: draft_api_symbol!(
+                    symbols,
+                    model_load_from_file: llama_model_load_from_file(_, _)
+                )?,
+                model_free: draft_api_symbol!(symbols, model_free: llama_model_free(_))?,
+                init_from_model: draft_api_symbol!(
+                    symbols,
+                    init_from_model: llama_init_from_model(_, _)
+                )?,
+                free: draft_api_symbol!(symbols, free: llama_free(_))?,
+                decode: draft_api_symbol!(symbols, decode: llama_decode(_, _))?,
+                get_model: draft_api_symbol!(symbols, get_model: llama_get_model(_))?,
+                get_memory: draft_api_symbol!(symbols, get_memory: llama_get_memory(_))?,
+                memory_seq_rm: draft_api_symbol!(
+                    symbols,
+                    memory_seq_rm: llama_memory_seq_rm(_, _, _, _)
+                )?,
+                get_logits_ith: draft_api_symbol!(
+                    symbols,
+                    get_logits_ith: llama_get_logits_ith(_, _)
+                )?,
+                n_ctx: draft_api_symbol!(symbols, n_ctx: llama_n_ctx(_))?,
+                n_batch: draft_api_symbol!(symbols, n_batch: llama_n_batch(_))?,
+                n_ubatch: draft_api_symbol!(symbols, n_ubatch: llama_n_ubatch(_))?,
+                model_n_embd: draft_api_symbol!(symbols, model_n_embd: llama_model_n_embd(_))?,
+                model_n_layer: draft_api_symbol!(symbols, model_n_layer: llama_model_n_layer(_))?,
+                model_rope_type: draft_api_symbol!(
+                    symbols,
+                    model_rope_type: llama_model_rope_type(_)
+                )?,
+                model_get_vocab: draft_api_symbol!(
+                    symbols,
+                    model_get_vocab: llama_model_get_vocab(_)
+                )?,
+                vocab_n_tokens: draft_api_symbol!(
+                    symbols,
+                    vocab_n_tokens: llama_vocab_n_tokens(_)
+                )?,
+                vocab_mask: draft_api_symbol!(symbols, vocab_mask: llama_vocab_mask(_))?,
+                set_causal_attn: draft_api_symbol!(
+                    symbols,
+                    set_causal_attn: llama_set_causal_attn(_, _)
+                )?,
                 set_embeddings_nextn: symbols
                     .lookup_optional(b"_Z26llama_set_embeddings_nextnP13llama_contextbb\0")?,
                 get_embeddings_nextn: symbols
@@ -551,7 +625,10 @@ pub(crate) fn llama_draft_api() -> Option<&'static LlamaDraftApi> {
                     .lookup_optional(b"_Z30llama_model_target_layer_ids_nPK11llama_model\0")?,
                 model_dflash_selector_top_k: symbols
                     .lookup_optional(b"_Z33llama_model_dflash_selector_top_kPK11llama_model\0")?,
-                backend_dev_by_name: symbols.lookup_optional(b"ggml_backend_dev_by_name\0")?,
+                backend_dev_by_name: draft_api_symbol!(
+                    symbols,
+                    backend_dev_by_name: ggml_backend_dev_by_name(_)
+                )?,
             })
         })
         .as_ref()
@@ -560,24 +637,25 @@ pub(crate) fn llama_draft_api() -> Option<&'static LlamaDraftApi> {
 pub fn skippy_model_open_with_events_fn() -> Option<SkippyModelOpenWithEventsFn> {
     static CACHE: OnceLock<Option<SkippyModelOpenWithEventsFn>> = OnceLock::new();
     *CACHE.get_or_init(|| {
-        symbols().lookup_optional::<SkippyModelOpenWithEventsFn>(b"skippy_model_open_with_events\0")
+        optional_symbol!(
+            skippy::skippy_model_open_with_events(_, _, _, _, _) as SkippyModelOpenWithEventsFn
+        )
     })
 }
 
 pub fn skippy_model_attach_mtp_draft_model_fn() -> Option<SkippyModelAttachMtpDraftModelFn> {
     static CACHE: OnceLock<Option<SkippyModelAttachMtpDraftModelFn>> = OnceLock::new();
     *CACHE.get_or_init(|| {
-        symbols().lookup_optional::<SkippyModelAttachMtpDraftModelFn>(
-            b"skippy_model_attach_mtp_draft_model\0",
-        )
+        optional_symbol!(skippy::skippy_model_attach_mtp_draft_model(_, _, _, _)
+            as SkippyModelAttachMtpDraftModelFn)
     })
 }
 
 pub fn skippy_decode_step_sampled_mtp_fn() -> Option<SkippyDecodeStepSampledMtpFn> {
     static CACHE: OnceLock<Option<SkippyDecodeStepSampledMtpFn>> = OnceLock::new();
     *CACHE.get_or_init(|| {
-        symbols()
-            .lookup_optional::<SkippyDecodeStepSampledMtpFn>(b"skippy_decode_step_sampled_mtp\0")
+        optional_symbol!(skippy::skippy_decode_step_sampled_mtp(_, _, _, _, _, _, _)
+            as SkippyDecodeStepSampledMtpFn)
     })
 }
 
@@ -585,8 +663,9 @@ pub fn skippy_model_open_from_parts_with_events_fn() -> Option<SkippyModelOpenFr
 {
     static CACHE: OnceLock<Option<SkippyModelOpenFromPartsWithEventsFn>> = OnceLock::new();
     *CACHE.get_or_init(|| {
-        symbols().lookup_optional::<SkippyModelOpenFromPartsWithEventsFn>(
-            b"skippy_model_open_from_parts_with_events\0",
+        optional_symbol!(
+            skippy::skippy_model_open_from_parts_with_events(_, _, _, _, _, _)
+                as SkippyModelOpenFromPartsWithEventsFn
         )
     })
 }
@@ -594,16 +673,19 @@ pub fn skippy_model_open_from_parts_with_events_fn() -> Option<SkippyModelOpenFr
 fn skippy_apply_chat_template_json_fn() -> Option<SkippyApplyChatTemplateJsonFn> {
     static CACHE: OnceLock<Option<SkippyApplyChatTemplateJsonFn>> = OnceLock::new();
     *CACHE.get_or_init(|| {
-        symbols()
-            .lookup_optional::<SkippyApplyChatTemplateJsonFn>(b"skippy_apply_chat_template_json\0")
+        optional_symbol! {
+            skippy::skippy_apply_chat_template_json(
+                _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _
+            ) as SkippyApplyChatTemplateJsonFn
+        }
     })
 }
 
 fn skippy_parse_chat_response_json_fn() -> Option<SkippyParseChatResponseJsonFn> {
     static CACHE: OnceLock<Option<SkippyParseChatResponseJsonFn>> = OnceLock::new();
     *CACHE.get_or_init(|| {
-        symbols()
-            .lookup_optional::<SkippyParseChatResponseJsonFn>(b"skippy_parse_chat_response_json\0")
+        optional_symbol!(skippy::skippy_parse_chat_response_json(_, _, _, _, _, _, _)
+            as SkippyParseChatResponseJsonFn)
     })
 }
 

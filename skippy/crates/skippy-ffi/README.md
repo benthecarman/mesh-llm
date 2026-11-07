@@ -44,6 +44,28 @@ code in this crate keeps only safe wrappers, opaque-handle ownership,
 dynamic-library symbol loading, `Default` initialization ergonomics, and
 re-exports. Never edit `src/bindings/*.rs` by hand.
 
+The dynamic runtime resolves native functions by name, so the function-pointer
+types in `src/dynamic.rs` and `src/llama_draft.rs` are written by hand.
+`src/dynamic/signature_check.rs` checks them against the generated
+declarations at compile time: a parameter or return type that drifts from the
+bindings fails the build. Only three differences are allowed:
+
+- `*mut`/`*const Opaque` can stand in for a pointer of the same mutability to
+  a listed opaque llama.cpp or mtmd handle.
+- `i32` can stand in for the `#[repr(i32)]` rope-type enum.
+- The llama copy of `ggml_log_callback` can stand in for the mtmd copy of the
+  same typedef.
+
+The checks run where `src/dynamic.rs` names each symbol. List a required
+symbol in `dynamic_symbols!` under the bindings module (`llama`, `skippy`, or
+`mtmd`) that declares it. Look up an optional symbol with `optional_symbol!`
+and a C-linkage draft-context symbol with `draft_api_symbol!`.
+
+The C++-linkage draft-context entry points (`llama-ext.h`) are not checked.
+They have no generated declarations. Their mangled names encode the parameter
+types, so a parameter change makes lookup fail. The mangling does not encode
+the return type, so a changed return type is not detected.
+
 Generation inputs and allowlists live in two reviewed places:
 
 - `bindgen/wrapper/*.h` - narrow wrapper headers: Skippy's own public ABI

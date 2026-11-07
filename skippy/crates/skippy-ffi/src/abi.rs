@@ -399,7 +399,7 @@ pub type Opaque = c_void;
 
 /// `llama_perf_context`, resolved dynamically when the runtime exports it and
 /// called directly when the runtime is linked statically.
-pub type LlamaPerfContextFn = unsafe extern "C" fn(ctx: *mut Opaque) -> LlamaPerfContextData;
+pub type LlamaPerfContextFn = unsafe extern "C" fn(ctx: *const Opaque) -> LlamaPerfContextData;
 
 /// Graph-reuse and realloc counters returned by value from
 /// `llama_perf_context`.
