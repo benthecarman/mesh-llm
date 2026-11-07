@@ -1446,12 +1446,8 @@ impl StageSession {
     /// for tests of split DFlash bookkeeping above the runtime.
     pub fn detached_dflash_for_test() -> Self {
         Self {
-            raw: ptr::null_mut(),
-            token_count: 0,
-            terminal_stage: true,
-            batched_activation_exports: true,
             dflash: Some(DFlashSessionLink::detached(0)),
-            dflash_split: None,
+            ..Self::detached_for_test()
         }
     }
 
@@ -1496,7 +1492,7 @@ impl StageModel {
         // and refreshes any installed stage program for layer capture.
         let probe = self.create_session()?;
         let target_ctx: *mut Opaque =
-            unsafe { skippy_ffi::skippy_session_llama_context(probe.raw) }.cast();
+            unsafe { skippy_ffi::skippy_session_llama_context(probe.raw()) }.cast();
         if target_ctx.is_null() {
             bail!("target session has no llama context");
         }
@@ -1520,10 +1516,11 @@ impl StageModel {
 fn refresh_target_program(session: &StageSession) -> Result<()> {
     let mut error = ptr::null_mut();
     let status =
-        unsafe { skippy_ffi::skippy_session_begin_external_decode(session.raw, &mut error) };
+        unsafe { skippy_ffi::skippy_session_begin_external_decode(session.raw(), &mut error) };
     ensure_ok(status, error)?;
     let mut error = ptr::null_mut();
-    let status = unsafe { skippy_ffi::skippy_session_end_external_decode(session.raw, &mut error) };
+    let status =
+        unsafe { skippy_ffi::skippy_session_end_external_decode(session.raw(), &mut error) };
     ensure_ok(status, error)
 }
 
@@ -1569,12 +1566,8 @@ mod tests {
 
     fn drafting_session() -> StageSession {
         StageSession {
-            raw: ptr::null_mut(),
-            token_count: 0,
-            terminal_stage: true,
-            batched_activation_exports: true,
             dflash: Some(DFlashSessionLink::detached(0)),
-            dflash_split: None,
+            ..StageSession::detached_for_test()
         }
     }
 

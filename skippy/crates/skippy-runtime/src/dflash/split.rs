@@ -757,7 +757,7 @@ impl StageModel {
             .ok_or_else(|| anyhow!("native runtime does not export the draft-context API"))?;
         let probe = self.create_session()?;
         let target_ctx: *mut Opaque =
-            unsafe { skippy_ffi::skippy_session_llama_context(probe.raw) }.cast();
+            unsafe { skippy_ffi::skippy_session_llama_context(probe.raw()) }.cast();
         if target_ctx.is_null() {
             bail!("target session has no llama context");
         }
@@ -920,12 +920,9 @@ mod tests {
 
     fn session_with_captured(rows: DFlashFeatureRows) -> StageSession {
         StageSession {
-            raw: std::ptr::null_mut(),
-            token_count: 0,
             terminal_stage: false,
-            batched_activation_exports: true,
-            dflash: None,
             dflash_split: Some(Box::new(DFlashSplitSession::with_captured(rows))),
+            ..StageSession::detached_for_test()
         }
     }
 
@@ -1023,12 +1020,8 @@ mod tests {
     #[test]
     fn a_session_outside_split_dflash_ignores_the_mark() {
         let mut session = StageSession {
-            raw: std::ptr::null_mut(),
-            token_count: 0,
             terminal_stage: false,
-            batched_activation_exports: true,
-            dflash: None,
-            dflash_split: None,
+            ..StageSession::detached_for_test()
         };
         session.dflash_mark_unattended(true);
         assert!(session.dflash_split.is_none());
@@ -1177,12 +1170,8 @@ mod tests {
         let mut link = super::super::DFlashSessionLink::detached(0);
         link.input_layer = input_layer;
         StageSession {
-            raw: std::ptr::null_mut(),
-            token_count: 0,
-            terminal_stage: true,
-            batched_activation_exports: true,
             dflash: Some(link),
-            dflash_split: None,
+            ..StageSession::detached_for_test()
         }
     }
 

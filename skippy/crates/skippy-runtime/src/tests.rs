@@ -7,6 +7,7 @@ mod tests {
         ChatReasoningFormat, ChatTemplateJsonOptions, ChatTemplateMessage, DecodeFrameBatchRequest,
         CheckpointQuantization, FlashAttentionType, GGML_TYPE_F16, GlmDsaPolicy,
         IterationBatchPhase, IterationBatchRequest, ModelInfo, MtpSource, NativeMtpDraft,
+        PartialBatchExecution,
         RuntimeConfig, RuntimeLoadMode, SamplingConfig, SplitMode, StageModel, StageSession, Status,
         TensorRole, format_skippy_error,
     };
@@ -62,7 +63,7 @@ mod tests {
         let error = model
             .attach_mtp_draft_model("/definitely/missing/model.gguf", &RuntimeConfig::default())
             .unwrap_err();
-        assert!(error.to_string().contains("model readers are active"));
+        assert!(error.to_string().contains("model readers or sessions are active"));
 
         drop(reader);
         let error = model
@@ -137,6 +138,103 @@ mod tests {
             checkpoint_imatrix_sha256: None,
         };
         StageModel::open(model_path, &config)
+    }
+
+    #[test]
+    fn session_decodes_after_its_model_handle_drops_when_model_is_configured() -> Result<()> {
+        let Some(model_path) = correctness_model() else {
+            eprintln!("skipping: SKIPPY_CORRECTNESS_MODEL is not set");
+            return Ok(());
+        };
+        let model = open_correctness_model_with_context_and_lanes(&model_path, 256, 2)?;
+        let tokens = model.tokenize("A session keeps the model it borrows alive.", true)?;
+        assert!(tokens.len() >= 2, "correctness prompt must produce two tokens");
+
+        // Reference continuation while the model handle is still alive.
+        let mut reference = model.create_session()?;
+        let (reference_first, _) = reference.prefill_chunk_frame_sampled(&tokens, None, None, 0)?;
+        let reference_second = reference.decode_step(reference_first)?;
+        drop(reference);
+
+        let mut session = model.create_session()?;
+        drop(model);
+        // Before sessions held their model, this ran on a freed native model.
+        let (first, _) = session.prefill_chunk_frame_sampled(&tokens, None, None, 0)?;
+        let second = session.decode_step(first)?;
+        assert_eq!((first, second), (reference_first, reference_second));
+        drop(session);
+        Ok(())
+    }
+
+    /// Native invalid-argument errors propagate without retrying through
+    /// serial fallback, and no request in the batch runs.
+    #[test]
+    fn native_invalid_argument_is_returned_without_serial_fallback_when_model_is_configured()
+    -> Result<()> {
+        let Some(model_path) = correctness_model() else {
+            eprintln!("skipping: SKIPPY_CORRECTNESS_MODEL is not set");
+            return Ok(());
+        };
+        let model = open_correctness_model_with_context_and_lanes(&model_path, 256, 2)?;
+        let mut first = model.create_session()?;
+        let mut second = model.create_session()?;
+        let tokens = model.tokenize("An empty request is rejected.", true)?;
+        fn request<'a>(
+            session: &'a mut StageSession,
+            token_ids: &'a [i32],
+        ) -> IterationBatchRequest<'a> {
+            IterationBatchRequest {
+                session,
+                token_ids,
+                positions: &[],
+                sampling: None,
+                input: None,
+                sample_last: true,
+                phase: IterationBatchPhase::Prefill,
+            }
+        }
+        // Native rejects a request with no tokens before running any of them.
+        let error = StageSession::iteration_batch_sampled(&mut [
+            request(&mut first, &tokens),
+            request(&mut second, &[]),
+        ])
+        .err()
+        .expect("a request without tokens must be rejected");
+
+        assert!(error.to_string().contains("InvalidArgument"), "{error:#}");
+        assert!(error.downcast_ref::<PartialBatchExecution>().is_none());
+        assert_eq!(first.token_count(), 0);
+        assert_eq!(second.token_count(), 0);
+        Ok(())
+    }
+
+    /// A live session keeps late model mutation, such as attaching a draft,
+    /// from succeeding.
+    #[test]
+    fn live_session_prevents_late_model_mutation_when_model_is_configured() -> Result<()> {
+        let Some(model_path) = correctness_model() else {
+            eprintln!("skipping: SKIPPY_CORRECTNESS_MODEL is not set");
+            return Ok(());
+        };
+        let mut model = open_correctness_model(&model_path)?;
+        let session = model.create_session()?;
+        let error = model
+            .attach_mtp_draft_model("/definitely/missing/model.gguf", &RuntimeConfig::default())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("sessions are active"),
+            "unexpected error: {error}"
+        );
+
+        drop(session);
+        let error = model
+            .attach_mtp_draft_model("/definitely/missing/model.gguf", &RuntimeConfig::default())
+            .unwrap_err();
+        assert!(
+            !error.to_string().contains("sessions are active"),
+            "the guard must clear once the session drops: {error}"
+        );
+        Ok(())
     }
 
     #[test]

@@ -30,8 +30,8 @@ fn map_split_mode(mode: skippy_protocol::SplitMode) -> skippy_runtime::SplitMode
 pub(in crate::frontend) struct DraftRunner {
     pub(in crate::frontend) path: PathBuf,
     pub(in crate::frontend) window: usize,
-    // Fields drop in declaration order. Free the native session before the
-    // model it borrows; reversing these fields can abort inside llama.cpp.
+    // The session holds the native model it borrows, so these fields may drop
+    // in either order.
     pub(in crate::frontend) session: StageSession,
     pub(in crate::frontend) _model: StageModel,
     /// Tokens currently materialized in the draft session's KV, maintained so

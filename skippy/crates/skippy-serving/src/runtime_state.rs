@@ -355,8 +355,6 @@ impl RuntimeState {
 impl Drop for RuntimeState {
     fn drop(&mut self) {
         self.abandon_all_session_end_kv_exports();
-        self.sessions.clear();
-        self.idle_sessions.clear();
     }
 }
 

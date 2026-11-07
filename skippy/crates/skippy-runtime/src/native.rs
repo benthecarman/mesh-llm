@@ -12,7 +12,7 @@ use crate::logging::{clear_last_native_error, with_last_native_error, write_nati
 use crate::media::MediaProjector;
 use crate::path_cstring::path_to_cstring;
 use crate::runtime_events;
-use crate::session::StageSession;
+use crate::session::{NativeSession, SessionHandle, StageSession};
 use crate::vocabulary::{ensure_in_vocabulary, vocabulary_size};
 use crate::{
     ActivationBoundaryDesc, ChatReasoningFormat, ChatTemplateJsonOptions, ChatTemplateJsonResult,
@@ -98,7 +98,10 @@ pub struct SystemOneReadSlot {
     pub label_token_ids: Vec<i32>,
 }
 
-struct StageModelInner {
+/// The native model and what borrows it. [`StageModel`], its readers, and every
+/// [`StageSession`] created from it share this, so the native model is freed
+/// only after the last session that uses it.
+pub(crate) struct StageModelInner {
     raw: *mut RawModel,
     terminal_stage: bool,
     capability: Option<LoadedModelCapability>,
@@ -499,7 +502,7 @@ impl StageModel {
         config: &RuntimeConfig,
     ) -> Result<()> {
         let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
-            anyhow!("cannot attach MTP draft model while model readers are active")
+            anyhow!("cannot attach MTP draft model while model readers or sessions are active")
         })?;
         if inner.raw.is_null() {
             return Err(anyhow!("cannot attach MTP draft model to a null model"));
@@ -531,16 +534,15 @@ impl StageModel {
             unsafe { skippy_ffi::skippy_session_create(self.inner.raw, &mut raw, &mut error) };
         write_native_log_note(format!("skippy_session_create returned status={status:?}"));
         ensure_ok(status, error)?;
-        if raw.is_null() {
-            return Err(anyhow!("skippy_session_create returned a null handle"));
-        }
+        let native = NativeSession::adopt(raw, &self.inner)
+            .ok_or_else(|| anyhow!("skippy_session_create returned a null handle"))?;
         let mut session = StageSession {
-            raw,
             token_count: 0,
             terminal_stage: self.inner.terminal_stage,
             batched_activation_exports: self.supports_batched_activation_exports(),
             dflash: None,
             dflash_split: None,
+            native: SessionHandle::Native(native),
         };
         self.link_session_dflash(&mut session)?;
         Ok(session)
@@ -564,18 +566,16 @@ impl StageModel {
             )
         };
         ensure_ok(status, error)?;
-        if raw.is_null() {
-            return Err(anyhow!(
-                "skippy_session_create_from_resident_prefix returned a null handle"
-            ));
-        }
+        let native = NativeSession::adopt(raw, &self.inner).ok_or_else(|| {
+            anyhow!("skippy_session_create_from_resident_prefix returned a null handle")
+        })?;
         let mut session = StageSession {
-            raw,
             token_count: u64::try_from(token_ids.len()).context("token count exceeds u64")?,
             terminal_stage: self.inner.terminal_stage,
             batched_activation_exports: self.supports_batched_activation_exports(),
             dflash: None,
             dflash_split: None,
+            native: SessionHandle::Native(native),
         };
         self.link_session_dflash(&mut session)?;
         Ok(session)
@@ -597,7 +597,7 @@ impl StageModel {
 
     pub(crate) fn install_dflash_capture(&mut self, capture: SharedDFlashCapture) -> Result<()> {
         let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
-            anyhow!("cannot attach DFlash capture while model readers are active")
+            anyhow!("cannot attach DFlash capture while model readers or sessions are active")
         })?;
         inner.dflash_capture = Some(capture);
         Ok(())
@@ -613,7 +613,7 @@ impl StageModel {
 
     pub(crate) fn install_dflash_draft(&mut self, draft: SharedDFlashDraft) -> Result<()> {
         let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
-            anyhow!("cannot attach a DFlash draft while model readers are active")
+            anyhow!("cannot attach a DFlash draft while model readers or sessions are active")
         })?;
         if inner.dflash.is_some() {
             return Err(anyhow!("a DFlash draft is already attached"));

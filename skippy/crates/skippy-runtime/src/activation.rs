@@ -114,7 +114,7 @@ impl StageSession {
         let status = unsafe {
             if positions.is_empty() {
                 skippy_ffi::skippy_prefill_chunk_frame(
-                    self.raw,
+                    self.raw(),
                     token_ids.as_ptr(),
                     token_ids.len(),
                     input_desc_ptr,
@@ -127,7 +127,7 @@ impl StageSession {
                 )
             } else {
                 skippy_ffi::skippy_prefill_chunk_frame_with_positions(
-                    self.raw,
+                    self.raw(),
                     token_ids.as_ptr(),
                     token_ids.len(),
                     positions.as_ptr(),
@@ -221,7 +221,7 @@ impl StageSession {
         let status = unsafe {
             if positions.is_empty() {
                 skippy_ffi::skippy_prefill_chunk_frame_sampled(
-                    self.raw,
+                    self.raw(),
                     token_ids.as_ptr(),
                     token_ids.len(),
                     sampling_ptr,
@@ -236,7 +236,7 @@ impl StageSession {
                 )
             } else {
                 skippy_ffi::skippy_prefill_chunk_frame_sampled_with_positions(
-                    self.raw,
+                    self.raw(),
                     token_ids.as_ptr(),
                     token_ids.len(),
                     positions.as_ptr(),
@@ -347,7 +347,7 @@ impl StageSession {
             .map_or(ptr::null(), |sampling| sampling as *const RawSamplingConfig);
         let status = unsafe {
             skippy_ffi::skippy_decode_step_frame_sampled(
-                self.raw,
+                self.raw(),
                 token_id,
                 sampling_ptr,
                 input_desc_ptr,
@@ -397,7 +397,7 @@ impl StageSession {
             .map_or(ptr::null(), |sampling| sampling as *const RawSamplingConfig);
         let status = unsafe {
             skippy_ffi::skippy_decode_step_frame_sampled_mtp(
-                self.raw,
+                self.raw(),
                 token_id,
                 sampling_ptr,
                 input_desc_ptr,
@@ -459,7 +459,7 @@ impl StageSession {
         }
         let sessions = requests
             .iter_mut()
-            .map(|request| request.session.raw)
+            .map(|request| request.session.raw())
             .collect::<Vec<_>>();
         let token_ids = requests
             .iter()
@@ -686,7 +686,7 @@ impl StageSession {
             .map_or(ptr::null(), |sampling| sampling as *const RawSamplingConfig);
         let status = unsafe {
             skippy_ffi::skippy_verify_tokens_frame_sampled(
-                self.raw,
+                self.raw(),
                 token_ids.as_ptr(),
                 token_ids.len(),
                 sampling_ptr,
@@ -759,7 +759,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_session_copy_output_activation_frame(
-                self.raw,
+                self.raw(),
                 token_count,
                 &mut output_desc,
                 output_payload.as_mut_ptr().cast(),
@@ -786,7 +786,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_session_sample_current(
-                self.raw,
+                self.raw(),
                 sampling_ptr,
                 &mut predicted,
                 &mut error,

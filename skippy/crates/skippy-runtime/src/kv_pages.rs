@@ -158,7 +158,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_full_state(
-                self.raw,
+                self.raw(),
                 layer_start,
                 layer_end,
                 ptr::null_mut(),
@@ -176,7 +176,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_recurrent_state(
-                self.raw,
+                self.raw(),
                 ptr::null_mut(),
                 0,
                 &mut bytes,
@@ -224,7 +224,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_kv_page(
-                self.raw,
+                self.raw(),
                 layer_start,
                 layer_end,
                 token_start,
@@ -244,7 +244,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_state(
-                self.raw,
+                self.raw(),
                 layer_start,
                 layer_end,
                 ptr::null_mut(),
@@ -264,7 +264,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_state(
-                self.raw,
+                self.raw(),
                 layer_start,
                 layer_end,
                 payload.as_mut_ptr().cast(),
@@ -282,7 +282,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_import_state(
-                self.raw,
+                self.raw(),
                 layer_start,
                 layer_end,
                 input.as_ptr().cast(),
@@ -312,7 +312,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_full_state(
-                self.raw,
+                self.raw(),
                 layer_start,
                 layer_end,
                 ptr::null_mut(),
@@ -332,7 +332,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_full_state(
-                self.raw,
+                self.raw(),
                 layer_start,
                 layer_end,
                 payload.as_mut_ptr().cast(),
@@ -355,7 +355,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_import_full_state(
-                self.raw,
+                self.raw(),
                 layer_start,
                 layer_end,
                 input.as_ptr().cast(),
@@ -395,7 +395,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_kv_page(
-                self.raw,
+                self.raw(),
                 layer_start,
                 layer_end,
                 token_start,
@@ -418,7 +418,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_kv_page(
-                self.raw,
+                self.raw(),
                 layer_start,
                 layer_end,
                 token_start,
@@ -451,7 +451,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_kv_page(
-                self.raw,
+                self.raw(),
                 layer_start,
                 layer_end,
                 token_start,
@@ -482,7 +482,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_import_kv_page(
-                self.raw,
+                self.raw(),
                 &raw,
                 payload.as_ptr().cast(),
                 payload.len(),
@@ -514,7 +514,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_import_cachegen_kv_page_v1(
-                self.raw,
+                self.raw(),
                 &raw,
                 records.as_ptr(),
                 records.len(),
@@ -535,7 +535,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_recurrent_state(
-                self.raw,
+                self.raw(),
                 ptr::null_mut(),
                 0,
                 &mut bytes,
@@ -553,7 +553,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_recurrent_state(
-                self.raw,
+                self.raw(),
                 payload.as_mut_ptr().cast(),
                 payload.len(),
                 &mut written,
@@ -569,7 +569,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_import_recurrent_state(
-                self.raw,
+                self.raw(),
                 input.as_ptr().cast(),
                 input.len(),
                 &mut error,

@@ -358,7 +358,7 @@ fn raw_iteration_requests(
         .enumerate()
         .map(
             |(index, ((request, sampling), input))| RawIterationRequest {
-                session: request.session.raw,
+                session: request.session.raw(),
                 token_ids: request.token_ids.as_ptr(),
                 token_count: request.token_ids.len(),
                 positions: if request.positions.is_empty() {
