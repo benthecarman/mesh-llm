@@ -839,6 +839,7 @@ mod tests {
             batched_activation_exports: true,
             dflash: None,
             dflash_split: Some(Box::new(DFlashSplitSession::with_captured(rows))),
+            cache_sequence_limit: skippy_cache::LLAMA_MAX_SEQ,
         }
     }
 
@@ -1011,6 +1012,7 @@ mod tests {
             batched_activation_exports: true,
             dflash: Some(link),
             dflash_split: None,
+            cache_sequence_limit: skippy_cache::LLAMA_MAX_SEQ,
         }
     }
 

@@ -11,6 +11,7 @@ fn serial_decode_accepts_explicit_phase_and_matching_position() {
         batched_activation_exports: true,
         dflash: None,
         dflash_split: None,
+        cache_sequence_limit: skippy_cache::LLAMA_MAX_SEQ,
     };
     let request = IterationBatchRequest {
         session: &mut session,
@@ -36,6 +37,7 @@ fn serial_decode_accepts_framed_origin_for_recurrent_downstream_stage() {
             batched_activation_exports: true,
             dflash: None,
             dflash_split: None,
+            cache_sequence_limit: skippy_cache::LLAMA_MAX_SEQ,
         };
         let frame = ActivationFrame {
             desc: activation_desc(1),
@@ -71,6 +73,7 @@ fn serial_decode_rejects_invalid_decode_shapes() {
             batched_activation_exports: true,
             dflash: None,
             dflash_split: None,
+            cache_sequence_limit: skippy_cache::LLAMA_MAX_SEQ,
         };
         let request = IterationBatchRequest {
             session: &mut session,
@@ -96,6 +99,7 @@ fn one_token_prefill_tail_is_explicitly_not_decode() {
         batched_activation_exports: true,
         dflash: None,
         dflash_split: None,
+        cache_sequence_limit: skippy_cache::LLAMA_MAX_SEQ,
     };
     let request = IterationBatchRequest {
         session: &mut session,
@@ -119,6 +123,7 @@ fn serial_iteration_omits_samples_for_intermediate_stages() {
         batched_activation_exports: true,
         dflash: None,
         dflash_split: None,
+        cache_sequence_limit: skippy_cache::LLAMA_MAX_SEQ,
     };
     let request = IterationBatchRequest {
         session: &mut session,
@@ -162,6 +167,7 @@ fn batch_session(terminal_stage: bool, batched_activation_exports: bool) -> Stag
         batched_activation_exports,
         dflash: None,
         dflash_split: None,
+        cache_sequence_limit: skippy_cache::LLAMA_MAX_SEQ,
     }
 }
 

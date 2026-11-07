@@ -36,6 +36,24 @@ pub enum PoolingType {
     Cls,
     Last,
     Rank,
+    /// A pooling code this runtime does not know. Native code copies the
+    /// value from the model file without a range check, so any `i32` can
+    /// arrive here.
+    Other(i32),
+}
+
+impl From<skippy_ffi::WorkloadPooling> for PoolingType {
+    fn from(raw: skippy_ffi::WorkloadPooling) -> Self {
+        match raw {
+            skippy_ffi::WorkloadPooling::Unspecified => Self::Unspecified,
+            skippy_ffi::WorkloadPooling::None => Self::None,
+            skippy_ffi::WorkloadPooling::Mean => Self::Mean,
+            skippy_ffi::WorkloadPooling::Cls => Self::Cls,
+            skippy_ffi::WorkloadPooling::Last => Self::Last,
+            skippy_ffi::WorkloadPooling::Rank => Self::Rank,
+            other => Self::Other(other.0),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,17 +85,9 @@ impl TryFrom<skippy_ffi::WorkloadInfoV1> for WorkloadInfo {
             skippy_ffi::WorkloadKind::Rerank => ModelWorkload::Rerank,
             skippy_ffi::WorkloadKind::EncoderDecoder => ModelWorkload::EncoderDecoder,
         };
-        let pooling = match raw.pooling {
-            skippy_ffi::WorkloadPooling::Unspecified => PoolingType::Unspecified,
-            skippy_ffi::WorkloadPooling::None => PoolingType::None,
-            skippy_ffi::WorkloadPooling::Mean => PoolingType::Mean,
-            skippy_ffi::WorkloadPooling::Cls => PoolingType::Cls,
-            skippy_ffi::WorkloadPooling::Last => PoolingType::Last,
-            skippy_ffi::WorkloadPooling::Rank => PoolingType::Rank,
-        };
         Ok(Self {
             kind,
-            pooling,
+            pooling: raw.pooling.into(),
             output_dimensions: raw.output_dimensions,
             classifier_outputs: raw.classifier_outputs,
             has_encoder: raw.has_encoder,
@@ -107,6 +117,9 @@ struct StageModelInner {
     dflash: Option<SharedDFlashDraft>,
     /// Target-layer capture for a split DFlash draft on a later stage.
     dflash_capture: Option<SharedDFlashCapture>,
+    /// Exclusive bound on resident-prefix sequence IDs for this context; see
+    /// [`crate::session::cache_sequence_limit`].
+    cache_sequence_limit: i32,
 }
 
 /// A read-only model handle for vocabulary operations that do not touch a
@@ -172,6 +185,7 @@ impl StageModel {
                 capability: None,
                 dflash: None,
                 dflash_capture: None,
+                cache_sequence_limit: skippy_cache::LLAMA_MAX_SEQ,
             }),
             media: None,
         }
@@ -238,6 +252,7 @@ impl StageModel {
                 capability,
                 dflash: None,
                 dflash_capture: None,
+                cache_sequence_limit: crate::session::cache_sequence_limit(config),
             }),
             media,
         })
@@ -541,6 +556,7 @@ impl StageModel {
             batched_activation_exports: self.supports_batched_activation_exports(),
             dflash: None,
             dflash_split: None,
+            cache_sequence_limit: self.inner.cache_sequence_limit,
         };
         self.link_session_dflash(&mut session)?;
         Ok(session)
@@ -551,6 +567,7 @@ impl StageModel {
         cache_seq_id: i32,
         token_ids: &[i32],
     ) -> Result<StageSession> {
+        crate::session::ensure_cache_sequence_id(cache_seq_id, self.inner.cache_sequence_limit)?;
         let mut raw = ptr::null_mut();
         let mut error = ptr::null_mut();
         let status = unsafe {
@@ -576,6 +593,7 @@ impl StageModel {
             batched_activation_exports: self.supports_batched_activation_exports(),
             dflash: None,
             dflash_split: None,
+            cache_sequence_limit: self.inner.cache_sequence_limit,
         };
         self.link_session_dflash(&mut session)?;
         Ok(session)
@@ -1314,6 +1332,35 @@ mod output_capacity_tests {
             assert!(converted.has_encoder);
             assert!(!converted.has_decoder);
             assert!(converted.full_model_only);
+        }
+    }
+
+    #[test]
+    /// Keep pooling codes outside the declared set instead of assuming them
+    /// away: native code copies the GGUF `pooling_type` key unchecked.
+    fn workload_descriptor_keeps_unknown_pooling_codes() {
+        use skippy_ffi::bindings::skippy::skippy_workload_pooling as RawPooling;
+
+        let cases = [
+            (
+                skippy_ffi::WorkloadPooling::Unspecified,
+                PoolingType::Unspecified,
+            ),
+            (skippy_ffi::WorkloadPooling::None, PoolingType::None),
+            (skippy_ffi::WorkloadPooling::Cls, PoolingType::Cls),
+            (skippy_ffi::WorkloadPooling::Last, PoolingType::Last),
+            (skippy_ffi::WorkloadPooling::Rank, PoolingType::Rank),
+            (RawPooling(5), PoolingType::Other(5)),
+            (RawPooling(-2), PoolingType::Other(-2)),
+            (RawPooling(i32::MAX), PoolingType::Other(i32::MAX)),
+        ];
+        for (raw_pooling, expected) in cases {
+            let converted = WorkloadInfo::try_from(skippy_ffi::WorkloadInfoV1 {
+                pooling: raw_pooling,
+                ..Default::default()
+            })
+            .expect("valid workload descriptor");
+            assert_eq!(converted.pooling, expected);
         }
     }
 

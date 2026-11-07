@@ -1319,6 +1319,7 @@ impl StageSession {
             batched_activation_exports: true,
             dflash: Some(DFlashSessionLink::detached(0)),
             dflash_split: None,
+            cache_sequence_limit: skippy_cache::LLAMA_MAX_SEQ,
         }
     }
 
@@ -1421,6 +1422,7 @@ mod tests {
             batched_activation_exports: true,
             dflash: Some(DFlashSessionLink::detached(0)),
             dflash_split: None,
+            cache_sequence_limit: skippy_cache::LLAMA_MAX_SEQ,
         }
     }
 

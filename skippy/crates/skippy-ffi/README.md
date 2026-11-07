@@ -134,6 +134,11 @@ the runtime-event discriminants and two dead exports:
   native headers and are removed; `skippy-protocol` defines its own
   activation descriptor types for its config surface.
 
+`WorkloadPooling` (`enum skippy_workload_pooling`) is a newtype over the C
+integer with associated constants, not a Rust enum. Native code copies the
+model file's pooling type into it without a range check, and an unlisted
+value in a Rust enum is undefined behavior. Match it with a fallback arm.
+
 Everything else keeps its pre-generation spelling: struct field names are
 the C field names (with `type_`-style keyword escapes where C uses a Rust
 keyword), and enum discriminants keep their historical CamelCase names.

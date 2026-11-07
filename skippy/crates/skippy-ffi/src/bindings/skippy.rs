@@ -1816,16 +1816,27 @@ pub enum skippy_workload_kind {
     Rerank = 2,
     EncoderDecoder = 3,
 }
-#[repr(i32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub enum skippy_workload_pooling {
-    Unspecified = -1,
-    None = 0,
-    Mean = 1,
-    Cls = 2,
-    Last = 3,
-    Rank = 4,
+impl skippy_workload_pooling {
+    pub const Unspecified: skippy_workload_pooling = skippy_workload_pooling(-1);
 }
+impl skippy_workload_pooling {
+    pub const None: skippy_workload_pooling = skippy_workload_pooling(0);
+}
+impl skippy_workload_pooling {
+    pub const Mean: skippy_workload_pooling = skippy_workload_pooling(1);
+}
+impl skippy_workload_pooling {
+    pub const Cls: skippy_workload_pooling = skippy_workload_pooling(2);
+}
+impl skippy_workload_pooling {
+    pub const Last: skippy_workload_pooling = skippy_workload_pooling(3);
+}
+impl skippy_workload_pooling {
+    pub const Rank: skippy_workload_pooling = skippy_workload_pooling(4);
+}
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub struct skippy_workload_pooling(pub ::std::os::raw::c_int);
 #[doc = " @brief Runtime-probed workload properties for an opened model."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]

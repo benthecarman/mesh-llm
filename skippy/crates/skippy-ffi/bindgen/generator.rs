@@ -288,6 +288,15 @@ impl BindingGenerator {
             .raw_line("#![allow(unpredictable_function_pointer_comparisons)]")
             .header(Self::wrapper_dir().join(wrapper).display().to_string())
             .parse_callbacks(Box::new(EnumRenamer))
+            // Enums whose values native code copies from model files without
+            // a range check are newtypes, not Rust enums: an unlisted value
+            // in a Rust enum is undefined behavior, while a newtype holds it
+            // and callers decode it with a fallback arm. The workload pooling
+            // type comes from the GGUF `pooling_type` key, which upstream
+            // llama.cpp does not validate. bindgen applies `newtype_enum`
+            // before `rustified_enum`, so these names win over the pattern
+            // below.
+            .newtype_enum("skippy_workload_pooling")
             // Rustified enums only for named C enums (all carry an owner
             // prefix; bindgen full-matches these against the enum name).
             // Anonymous C enums stay in consts style so their constants keep

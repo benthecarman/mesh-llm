@@ -9,9 +9,48 @@ use skippy_ffi::{
 
 use crate::dflash::DecodedRows;
 use crate::error::ensure_ok;
-use crate::{GenerationSignalWindow, NativeMtpDraft, SamplingConfig, TokenLogprobs, TokenSignal};
+use crate::{
+    GenerationSignalWindow, NativeMtpDraft, RuntimeConfig, SamplingConfig, TokenLogprobs,
+    TokenSignal,
+};
 
 const EMPTY_CHAT_GRAMMAR_METADATA: &str = r#"{"grammar":""}"#;
+
+/// Exclusive upper bound on the sequence IDs the native context opened with
+/// `config` accepts.
+///
+/// llama.cpp maps sequence IDs to KV streams through a table with one entry
+/// per stream, or `LLAMA_MAX_SEQ` entries when all sequences share one
+/// stream, and a `GGML_ASSERT` aborts the process on any ID past its end.
+/// Native model loading gives the context one sequence per lane and shares
+/// one stream unless `kv_unified` is explicitly false with more than one
+/// lane; then each lane is its own stream and the table has `lane_count`
+/// entries. Native loading can still force a shared stream for recurrent and
+/// hybrid memory, which does not support resident prefixes, so the smaller
+/// bound only rejects calls that would fail anyway.
+pub(crate) fn cache_sequence_limit(config: &RuntimeConfig) -> i32 {
+    let max = skippy_cache::LLAMA_MAX_SEQ;
+    if config.lane_count > 1 && config.kv_unified == Some(false) {
+        i32::try_from(config.lane_count).map_or(max, |lanes| lanes.min(max))
+    } else {
+        max
+    }
+}
+
+/// Rejects a resident-prefix sequence ID outside `0..limit` before it
+/// reaches native code. Native code rejects negative IDs and IDs that overlap
+/// execution lanes, but passes any larger ID to llama.cpp, where a
+/// `GGML_ASSERT` aborts the process. `limit` comes from
+/// [`cache_sequence_limit`].
+pub(crate) fn ensure_cache_sequence_id(seq_id: i32, limit: i32) -> Result<()> {
+    if (0..limit).contains(&seq_id) {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "cache sequence id {seq_id} is outside 0..{limit} for this context"
+        ))
+    }
+}
 
 fn chat_sampling_metadata_for_native(metadata_json: &str) -> &str {
     // Template metadata can contain a large serialized PEG response parser,
@@ -60,6 +99,9 @@ pub struct StageSession {
     pub(crate) dflash: Option<crate::dflash::DFlashSessionLink>,
     /// Split-DFlash feature capture and the rows an earlier stage sent.
     pub(crate) dflash_split: Option<Box<crate::dflash::DFlashSplitSession>>,
+    /// Exclusive bound on resident-prefix sequence IDs for this context; see
+    /// [`cache_sequence_limit`].
+    pub(crate) cache_sequence_limit: i32,
 }
 
 pub struct DecodeBatchRequest<'a> {
@@ -305,6 +347,7 @@ impl StageSession {
     }
 
     pub fn save_prefix(&mut self, cache_seq_id: i32, token_count: u64) -> Result<()> {
+        ensure_cache_sequence_id(cache_seq_id, self.cache_sequence_limit)?;
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_session_save_prefix(self.raw, cache_seq_id, token_count, &mut error)
@@ -313,6 +356,7 @@ impl StageSession {
     }
 
     pub fn restore_prefix(&mut self, cache_seq_id: i32, token_ids: &[i32]) -> Result<()> {
+        ensure_cache_sequence_id(cache_seq_id, self.cache_sequence_limit)?;
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_session_restore_prefix(
@@ -330,6 +374,7 @@ impl StageSession {
     }
 
     pub fn drop_sequence(&mut self, seq_id: i32) -> Result<()> {
+        ensure_cache_sequence_id(seq_id, self.cache_sequence_limit)?;
         let mut error = ptr::null_mut();
         let status =
             unsafe { skippy_ffi::skippy_session_drop_sequence(self.raw, seq_id, &mut error) };
@@ -644,7 +689,8 @@ impl Drop for StageSession {
 #[cfg(test)]
 mod tests {
     use super::{
-        EMPTY_CHAT_GRAMMAR_METADATA, chat_sampling_metadata_for_native, native_position_to_u64,
+        EMPTY_CHAT_GRAMMAR_METADATA, RuntimeConfig, cache_sequence_limit,
+        chat_sampling_metadata_for_native, ensure_cache_sequence_id, native_position_to_u64,
         validate_native_sequence_id,
     };
 
@@ -666,6 +712,38 @@ mod tests {
         assert_eq!(validate_native_sequence_id(i32::MAX).unwrap(), i32::MAX);
         assert!(validate_native_sequence_id(-1).is_err());
         assert!(validate_native_sequence_id(i32::MIN).is_err());
+    }
+
+    #[test]
+    fn cache_sequence_id_check_rejects_ids_llama_cpp_would_abort_on() {
+        let max = skippy_cache::LLAMA_MAX_SEQ;
+        assert!(ensure_cache_sequence_id(0, max).is_ok());
+        assert!(ensure_cache_sequence_id(max - 1, max).is_ok());
+        assert!(ensure_cache_sequence_id(max, max).is_err());
+        assert!(ensure_cache_sequence_id(i32::MAX, max).is_err());
+        assert!(ensure_cache_sequence_id(-1, max).is_err());
+        assert!(ensure_cache_sequence_id(i32::MIN, max).is_err());
+    }
+
+    #[test]
+    fn cache_sequence_limit_follows_the_native_stream_layout() {
+        let max = skippy_cache::LLAMA_MAX_SEQ;
+        let config = |lane_count, kv_unified| RuntimeConfig {
+            lane_count,
+            kv_unified,
+            ..RuntimeConfig::default()
+        };
+        // One shared KV stream: llama.cpp accepts IDs up to LLAMA_MAX_SEQ.
+        assert_eq!(cache_sequence_limit(&config(1, None)), max);
+        assert_eq!(cache_sequence_limit(&config(1, Some(false))), max);
+        assert_eq!(cache_sequence_limit(&config(4, None)), max);
+        assert_eq!(cache_sequence_limit(&config(4, Some(true))), max);
+        // One stream per lane: only lane IDs exist, so every resident-prefix
+        // ID (at or above 2 * lane_count) is rejected before native code.
+        let limit = cache_sequence_limit(&config(4, Some(false)));
+        assert_eq!(limit, 4);
+        assert!(ensure_cache_sequence_id(8, limit).is_err());
+        assert_eq!(cache_sequence_limit(&config(u32::MAX, Some(false))), max);
     }
 
     #[test]
