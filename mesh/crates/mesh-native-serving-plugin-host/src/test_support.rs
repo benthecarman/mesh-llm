@@ -15,7 +15,10 @@ use std::{
 use mesh_native_serving_plugin_api as abi;
 use skippy_serving::frontend::LinearProposalQuery;
 
-use crate::{ActivePlugin, LoadedDefinition, MAX_NATIVE_PLUGIN_PROPOSAL_TOKENS};
+use crate::{
+    ActivePlugin, MAX_NATIVE_PLUGIN_PROPOSAL_TOKENS,
+    plugin_definition::{LoadedDefinition, validate_table},
+};
 
 pub(crate) static FAKE_NAME: &[u8] = b"test-serving-plugin";
 
@@ -274,18 +277,18 @@ pub(crate) fn fake_table() -> abi::NativeServingPluginV2 {
         abi_version: abi::NATIVE_SERVING_PLUGIN_ABI_V2,
         struct_size: size_of::<abi::NativeServingPluginV2>(),
         plugin_name: abi::ByteSlice::from_bytes(FAKE_NAME),
-        activate: fake_activate,
-        shutdown: fake_shutdown,
-        begin_generation: fake_begin,
-        commit_generation: fake_commit,
-        abort_generation: fake_abort,
-        finish_generation: fake_finish,
-        start_proposal: fake_start_proposal,
-        poll_proposal: fake_poll_proposal,
-        cancel_proposal: fake_cancel_proposal,
-        report_proposal: fake_report_proposal,
-        discard_proposal: fake_discard_proposal,
-        last_error: fake_last_error,
+        activate: Some(fake_activate),
+        shutdown: Some(fake_shutdown),
+        begin_generation: Some(fake_begin),
+        commit_generation: Some(fake_commit),
+        abort_generation: Some(fake_abort),
+        finish_generation: Some(fake_finish),
+        start_proposal: Some(fake_start_proposal),
+        poll_proposal: Some(fake_poll_proposal),
+        cancel_proposal: Some(fake_cancel_proposal),
+        report_proposal: Some(fake_report_proposal),
+        discard_proposal: Some(fake_discard_proposal),
+        last_error: Some(fake_last_error),
     }
 }
 
@@ -351,11 +354,12 @@ pub(crate) fn fake_active_with_timing_and_gates(
     Arc<Mutex<Vec<&'static str>>>,
     Arc<AtomicUsize>,
 ) {
-    let table = Box::leak(Box::new(fake_table()));
+    let (name, callbacks) =
+        validate_table(&fake_table()).expect("the fake plugin table must validate");
     let definition = Arc::new(LoadedDefinition {
         _library: None,
-        api: NonNull::from(table),
-        name: "test-serving-plugin".to_string(),
+        callbacks,
+        name,
     });
     let events = Arc::new(Mutex::new(Vec::new()));
     let discard_reasons = Arc::new(Mutex::new(Vec::new()));

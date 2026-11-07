@@ -933,3 +933,5 @@ fn a_failing_proposal_callback_reports_source_error_instead_of_abstaining() {
         LinearProposalSourceOutcome::SourceError
     );
 }
+
+mod retirement;

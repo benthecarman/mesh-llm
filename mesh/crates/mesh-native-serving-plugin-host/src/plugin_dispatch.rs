@@ -31,6 +31,11 @@ const PLUGIN_COMMAND_CAPACITY: usize = 1_024;
 /// Headroom above [`PLUGIN_COMMAND_CAPACITY`] kept exclusively for terminal
 /// dispositions, so a deadline discard is never lost to a full queue.
 const PLUGIN_TERMINAL_RESERVE: usize = 64;
+/// Room for queued [`PluginCommand::Retire`]s, counted apart from every other
+/// command so retirements never take the ordinary or terminal capacity. A
+/// retirement is small and needs no plugin callback; the bound only keeps a
+/// wedged worker from accumulating them without limit.
+const PLUGIN_RETIRE_RESERVE: usize = PLUGIN_COMMAND_CAPACITY;
 /// Bound on how long a drop waits for a worker to observe its closed queue.
 const CLEAN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -39,6 +44,14 @@ pub(crate) enum PluginCommand {
     Committed(GenerationCommit),
     Abort(GenerationAbort),
     Finish(GenerationReceipt),
+    /// Drops the host's commit tracking for a generation whose `Finish` or
+    /// `Abort` could not be queued. It is exempt from queue capacity and runs
+    /// after every command already queued for that generation, so a queued
+    /// `Begin` or commit cannot recreate the state behind it.
+    Retire {
+        request_id: u64,
+        session_id: u64,
+    },
     Proposal(LinearProposalQuery, SyncSender<ProposalResponse>),
     /// Primary-queue handoff for a report. The primary worker enqueues the
     /// actual passive report only after all earlier lifecycle commits, then
@@ -65,6 +78,8 @@ struct QueuedPluginCommand {
 
 struct QueueState {
     commands: VecDeque<QueuedPluginCommand>,
+    /// Number of [`PluginCommand::Retire`]s in `commands`.
+    retirements: usize,
     closed: bool,
 }
 
@@ -86,6 +101,7 @@ impl PluginCommandQueue {
         Self {
             state: Mutex::new(QueueState {
                 commands: VecDeque::with_capacity(PLUGIN_COMMAND_CAPACITY),
+                retirements: 0,
                 closed: false,
             }),
             available: Condvar::new(),
@@ -128,6 +144,25 @@ impl PluginCommandQueue {
         self.enqueue_within(command, capacity)
     }
 
+    /// Enqueues a [`PluginCommand::Retire`] in its own reserve, so a queue
+    /// that just rejected a generation's `Finish` or `Abort` can still release
+    /// that generation's tracked state.
+    fn try_enqueue_retirement(
+        &self,
+        request_id: u64,
+        session_id: u64,
+    ) -> std::result::Result<(), PluginCommandQueueError> {
+        self.enqueue_within(
+            PluginCommand::Retire {
+                request_id,
+                session_id,
+            },
+            PLUGIN_RETIRE_RESERVE,
+        )
+    }
+
+    /// Queues `command` if fewer than `capacity` commands of its class are
+    /// waiting. Retirements are one class; every other command is the other.
     fn enqueue_within(
         &self,
         command: PluginCommand,
@@ -140,8 +175,17 @@ impl PluginCommandQueue {
         if state.closed {
             return Err(PluginCommandQueueError::Stopped);
         }
-        if state.commands.len() >= capacity {
+        let retirement = matches!(command, PluginCommand::Retire { .. });
+        let occupied = if retirement {
+            state.retirements
+        } else {
+            state.commands.len() - state.retirements
+        };
+        if occupied >= capacity {
             return Err(PluginCommandQueueError::Full);
+        }
+        if retirement {
+            state.retirements += 1;
         }
         state.commands.push_back(QueuedPluginCommand {
             enqueued_at: Instant::now(),
@@ -173,6 +217,9 @@ impl PluginCommandQueue {
             // proposal observes its earlier committed state. Passive callbacks
             // use their own worker and cannot delay either class.
             if let Some(command) = state.commands.pop_front() {
+                if matches!(command.command, PluginCommand::Retire { .. }) {
+                    state.retirements -= 1;
+                }
                 return Some(command);
             }
             if state.closed {
@@ -333,6 +380,33 @@ impl PluginDriver {
         self.queue_for(&command).enqueue(command)
     }
 
+    /// Passes through the result of queueing a generation's `Finish` or
+    /// `Abort`. When that command was refused, the plugin never sees the
+    /// generation end, so the host queues a retirement of its own tracked
+    /// state instead of keeping it for the driver's lifetime.
+    pub(crate) fn retire_if_undelivered(
+        &self,
+        request_id: u64,
+        session_id: u64,
+        delivery: Result<()>,
+    ) -> Result<()> {
+        if delivery.is_err() {
+            match self.queue.try_enqueue_retirement(request_id, session_id) {
+                Ok(()) => {}
+                // A stopped worker only happens at shutdown, when the whole
+                // plugin state is about to be dropped anyway.
+                Err(PluginCommandQueueError::Stopped) => tracing::debug!(
+                    "native serving plugin worker stopped before retiring a generation"
+                ),
+                Err(error) => tracing::warn!(
+                    "native serving plugin could not retire an undelivered generation end: \
+                     {error:?}"
+                ),
+            }
+        }
+        delivery
+    }
+
     /// Enqueues a terminal proposal disposition using reserved capacity.
     pub(crate) fn enqueue_terminal(&self, command: PluginCommand) -> Result<()> {
         self.ensure_healthy()?;
@@ -489,10 +563,13 @@ fn plugin_worker(
             PluginCommand::Begin(event) => (active.begin(&event), true),
             PluginCommand::Committed(event) => (active.committed(&event), true),
             PluginCommand::Abort(event) => (active.abort(&event), true),
-            PluginCommand::Finish(event) => (
-                finish_after_passive_fence(&passive_queue, || active.finish(&event)),
-                true,
-            ),
+            PluginCommand::Finish(event) => {
+                (finish_generation(&active, &passive_queue, &event), true)
+            }
+            PluginCommand::Retire {
+                request_id,
+                session_id,
+            } => (active.retire_generation(request_id, session_id), true),
             PluginCommand::ReportHandoff(event) => {
                 let result = report_after_passive_handoff(&passive_queue, event);
                 (result, false)
@@ -755,6 +832,22 @@ fn finish_after_passive_fence<T>(
     finish()
 }
 
+/// Finishes a generation after its passive fence, and retires its tracked
+/// state after any failure. `ActivePlugin::finish` already retires on its own
+/// failures, so this matters only when the fence fails and `finish` never
+/// runs; retiring twice is harmless.
+fn finish_generation(
+    active: &ActivePlugin,
+    passive_queue: &PluginCommandQueue,
+    receipt: &GenerationReceipt,
+) -> Result<()> {
+    let result = finish_after_passive_fence(passive_queue, || active.finish(receipt));
+    if result.is_err() {
+        active.retire_generation(receipt.request_id, receipt.session_id)?;
+    }
+    result
+}
+
 fn plugin_passive_worker(
     active: Arc<ActivePlugin>,
     queue: Arc<PluginCommandQueue>,
@@ -784,6 +877,7 @@ fn plugin_passive_worker(
             | PluginCommand::Committed(_)
             | PluginCommand::Abort(_)
             | PluginCommand::Finish(_)
+            | PluginCommand::Retire { .. }
             | PluginCommand::ReportHandoff(_)
             | PluginCommand::Proposal(_, _) => {
                 unreachable!("lifecycle and proposal callbacks must use the primary worker queue")

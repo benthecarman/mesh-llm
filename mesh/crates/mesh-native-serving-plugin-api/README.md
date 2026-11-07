@@ -29,6 +29,13 @@ The V2 table is a breaking replacement for V1. Plugins must resolve
 `mesh_native_serving_plugin_v2` and validate the V2 ABI/version and structure
 sizes before use.
 
+Every callback in the V2 table is required. The Rust fields are
+`Option<extern "C" fn ...>` so a NULL entry from a C plugin is a readable
+`None` rather than undefined behavior; the type has the same size, alignment
+and NULL representation as a C function pointer, so the C layout is unchanged.
+The host refuses to load a table with any NULL callback and names the missing
+field in the error.
+
 For `TokenizerCapability::encode`, a non-null `output_length` is required. The
 host initializes it to zero before validating the remaining arguments, so every
 non-OK return other than `OUTPUT_TOO_SMALL` reports zero tokens; on

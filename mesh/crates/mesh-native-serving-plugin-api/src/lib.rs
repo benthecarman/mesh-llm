@@ -389,23 +389,30 @@ pub type DiscardProposal =
 pub type LastError =
     unsafe extern "C" fn(instance: PluginInstance, output: *mut c_char, capacity: usize) -> usize;
 
+/// The plugin's function table.
+///
+/// Every callback is required. The fields are `Option` because a C plugin can
+/// leave an entry NULL, and a NULL bare Rust `fn` is undefined behavior the
+/// moment it is read. `Option<extern "C" fn>` has the same size, alignment, and
+/// NULL representation as a C function pointer, so the C layout is unchanged;
+/// the host rejects a table with any `None` entry before it calls anything.
 #[repr(C)]
 pub struct NativeServingPluginV2 {
     pub abi_version: u32,
     pub struct_size: usize,
     pub plugin_name: ByteSlice,
-    pub activate: ActivatePlugin,
-    pub shutdown: ShutdownPlugin,
-    pub begin_generation: BeginGeneration,
-    pub commit_generation: CommitGeneration,
-    pub abort_generation: AbortGeneration,
-    pub finish_generation: FinishGeneration,
-    pub start_proposal: StartProposal,
-    pub poll_proposal: PollProposal,
-    pub cancel_proposal: CancelProposal,
-    pub report_proposal: ReportProposal,
-    pub discard_proposal: DiscardProposal,
-    pub last_error: LastError,
+    pub activate: Option<ActivatePlugin>,
+    pub shutdown: Option<ShutdownPlugin>,
+    pub begin_generation: Option<BeginGeneration>,
+    pub commit_generation: Option<CommitGeneration>,
+    pub abort_generation: Option<AbortGeneration>,
+    pub finish_generation: Option<FinishGeneration>,
+    pub start_proposal: Option<StartProposal>,
+    pub poll_proposal: Option<PollProposal>,
+    pub cancel_proposal: Option<CancelProposal>,
+    pub report_proposal: Option<ReportProposal>,
+    pub discard_proposal: Option<DiscardProposal>,
+    pub last_error: Option<LastError>,
 }
 
 // SAFETY: the ABI requires this table and the bytes referenced by
@@ -430,6 +437,17 @@ mod tests {
         assert_eq!(byte_slice.length, bytes.len());
         assert_eq!(token_slice.pointer, tokens.as_ptr());
         assert_eq!(token_slice.length, tokens.len());
+    }
+
+    #[test]
+    fn nullable_callbacks_keep_the_c_function_pointer_layout() {
+        assert_eq!(size_of::<Option<ActivatePlugin>>(), size_of::<*const ()>());
+        assert_eq!(align_of::<Option<LastError>>(), align_of::<*const ()>());
+        // SAFETY: NULL is the documented representation of `None` for
+        // `Option<extern "C" fn>`.
+        let null =
+            unsafe { std::mem::transmute::<*const (), Option<CancelProposal>>(std::ptr::null()) };
+        assert!(null.is_none());
     }
 
     #[test]

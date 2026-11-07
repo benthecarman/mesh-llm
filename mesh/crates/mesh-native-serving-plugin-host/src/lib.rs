@@ -1,5 +1,6 @@
 //! Loads one native serving plugin and adapts its stable ABI to Skippy hooks.
 
+mod plugin_definition;
 mod plugin_dispatch;
 #[cfg(test)]
 mod test_support;
@@ -7,7 +8,7 @@ mod tokenizer_capability;
 
 use std::{
     collections::HashMap,
-    ffi::{c_char, c_void},
+    ffi::c_void,
     path::{Path, PathBuf},
     ptr::NonNull,
     sync::{Arc, Mutex, OnceLock},
@@ -16,8 +17,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use libloading::Library;
 use mesh_native_serving_plugin_api as abi;
+use plugin_definition::LoadedDefinition;
 use plugin_dispatch::{PluginCommand, PluginDriver};
 use skippy_serving::frontend::{
     CompositeGenerationLifecycleIngress, GenerationAbort, GenerationCommit,
@@ -31,7 +32,6 @@ use skippy_serving::serving_hooks::{ModelServingHooks, ModelServingHooksFactory}
 use skippy_serving::tokenizer::TokenizerCapability;
 use tokenizer_capability::HostTokenizerCapability;
 
-const ERROR_BUFFER_BYTES: usize = 2_048;
 const MAX_NATIVE_PLUGIN_PROPOSAL_TOKENS: usize = 4_096;
 const PROPOSAL_POLL_INTERVAL: Duration = Duration::from_micros(50);
 
@@ -127,7 +127,7 @@ impl ModelServingHooksFactory for NativeServingPluginFactory {
         let mut activation = abi::PluginActivation {
             instance: std::ptr::null_mut(),
         };
-        let status = unsafe { (self.definition.api().activate)(&context, &raw mut activation) };
+        let status = unsafe { (self.definition.callbacks.activate)(&context, &raw mut activation) };
         if status != abi::PluginStatus::OK {
             return Err(self.definition.status_error(
                 activation.instance,
@@ -167,87 +167,6 @@ impl ModelServingHooksFactory for NativeServingPluginFactory {
             )?,
         ))
     }
-}
-
-struct LoadedDefinition {
-    _library: Option<Library>,
-    api: NonNull<abi::NativeServingPluginV2>,
-    name: String,
-}
-
-// SAFETY: the ABI contract requires the static function table and loaded
-// library to support concurrent host calls for the lifetime of the library.
-unsafe impl Send for LoadedDefinition {}
-// SAFETY: see the `Send` contract above; the table is immutable after load.
-unsafe impl Sync for LoadedDefinition {}
-
-impl LoadedDefinition {
-    fn load(path: &Path) -> Result<Self> {
-        let library = unsafe { Library::new(path) }
-            .with_context(|| format!("load native serving plugin {}", path.display()))?;
-        let entry = unsafe {
-            library.get::<abi::NativeServingPluginEntryV2>(abi::NATIVE_SERVING_PLUGIN_ENTRY_V2)
-        }
-        .with_context(|| {
-            format!(
-                "resolve native serving plugin entrypoint in {}",
-                path.display()
-            )
-        })?;
-        let api = NonNull::new(unsafe { entry() }.cast_mut())
-            .context("native serving plugin entrypoint returned null")?;
-        let name = validate_table(unsafe { api.as_ref() })?;
-        Ok(Self {
-            _library: Some(library),
-            api,
-            name,
-        })
-    }
-
-    fn api(&self) -> &abi::NativeServingPluginV2 {
-        unsafe { self.api.as_ref() }
-    }
-
-    fn status_error(
-        &self,
-        instance: abi::PluginInstance,
-        action: &str,
-        status: abi::PluginStatus,
-    ) -> anyhow::Error {
-        let detail = self.last_error(instance);
-        anyhow!("{action} `{}` failed with {status:?}: {detail}", self.name)
-    }
-
-    fn last_error(&self, instance: abi::PluginInstance) -> String {
-        let mut buffer = [0_u8; ERROR_BUFFER_BYTES];
-        let written = unsafe {
-            (self.api().last_error)(instance, buffer.as_mut_ptr().cast::<c_char>(), buffer.len())
-        };
-        let length = written.min(buffer.len());
-        String::from_utf8_lossy(&buffer[..length]).into_owned()
-    }
-}
-
-fn validate_table(table: &abi::NativeServingPluginV2) -> Result<String> {
-    if table.abi_version != abi::NATIVE_SERVING_PLUGIN_ABI_V2 {
-        bail!(
-            "native serving plugin ABI {} is incompatible with host ABI {}",
-            table.abi_version,
-            abi::NATIVE_SERVING_PLUGIN_ABI_V2
-        );
-    }
-    if table.struct_size != size_of::<abi::NativeServingPluginV2>() {
-        bail!(
-            "native serving plugin table size {} does not match host size {}",
-            table.struct_size,
-            size_of::<abi::NativeServingPluginV2>()
-        );
-    }
-    let name = unsafe { read_utf8(table.plugin_name, "plugin name") }?;
-    if name.trim().is_empty() {
-        bail!("native serving plugin name must not be empty");
-    }
-    Ok(name)
 }
 
 struct ActivePlugin {
@@ -291,7 +210,8 @@ impl ActivePlugin {
             agent_session_id: abi::ByteSlice::from_bytes(agent_session_id.as_bytes()),
             prompt_token_ids: abi::TokenSlice::from_tokens(&start.prompt_token_ids),
         };
-        let status = unsafe { (self.definition.api().begin_generation)(self.instance()?, &event) };
+        let status =
+            unsafe { (self.definition.callbacks.begin_generation)(self.instance()?, &event) };
         self.call_status("begin generation", status)?;
         self.committed_generated_tokens
             .lock()
@@ -363,29 +283,39 @@ impl ActivePlugin {
             generated_token_count: u64::try_from(generated_token_count)?,
             token_ids: abi::TokenSlice::from_tokens(token_ids),
         };
-        let status = unsafe { (self.definition.api().commit_generation)(self.instance()?, &event) };
+        let status =
+            unsafe { (self.definition.callbacks.commit_generation)(self.instance()?, &event) };
         self.call_status("commit generation", status)?;
         committed_generated_tokens.insert(key, generated_token_count);
         Ok(())
     }
 
     fn abort(&self, abort: &GenerationAbort) -> Result<()> {
+        let result = self.deliver_abort(abort);
+        self.retire_generation(abort.request_id, abort.session_id)?;
+        result
+    }
+
+    fn deliver_abort(&self, abort: &GenerationAbort) -> Result<()> {
         let event = abi::GenerationAbort {
             struct_size: size_of::<abi::GenerationAbort>(),
             request_id: abort.request_id,
             session_id: abort.session_id,
         };
-        let status = unsafe { (self.definition.api().abort_generation)(self.instance()?, &event) };
-        let result = self.call_status("abort generation", status);
-        self.committed_generated_tokens
-            .lock()
-            .map_err(|_| anyhow!("native serving plugin commit state lock poisoned"))?
-            .remove(&(abort.request_id, abort.session_id));
+        let status =
+            unsafe { (self.definition.callbacks.abort_generation)(self.instance()?, &event) };
+        self.call_status("abort generation", status)
+    }
+
+    /// Finishes a generation. Its tracked commit state is retired on every
+    /// path, including a final commit or finish callback that fails.
+    fn finish(&self, receipt: &GenerationReceipt) -> Result<()> {
+        let result = self.deliver_finish(receipt);
+        self.retire_generation(receipt.request_id, receipt.session_id)?;
         result
     }
 
-    fn finish(&self, receipt: &GenerationReceipt) -> Result<()> {
-        let key = (receipt.request_id, receipt.session_id);
+    fn deliver_finish(&self, receipt: &GenerationReceipt) -> Result<()> {
         self.commit_final_suffix(
             receipt.request_id,
             receipt.session_id,
@@ -409,13 +339,32 @@ impl ActivePlugin {
                 &receipt.request_to_token_emission_us,
             ),
         };
-        let status = unsafe { (self.definition.api().finish_generation)(self.instance()?, &event) };
-        let result = self.call_status("finish generation", status);
+        let status =
+            unsafe { (self.definition.callbacks.finish_generation)(self.instance()?, &event) };
+        self.call_status("finish generation", status)
+    }
+
+    /// Drops the host's commit tracking for a generation that has ended,
+    /// whether or not its terminal callback reached the plugin.
+    fn retire_generation(&self, request_id: u64, session_id: u64) -> Result<()> {
         self.committed_generated_tokens
             .lock()
             .map_err(|_| anyhow!("native serving plugin commit state lock poisoned"))?
-            .remove(&key);
-        result
+            .remove(&(request_id, session_id));
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn tracked_generation_count(&self) -> usize {
+        self.committed_generated_tokens.lock().unwrap().len()
+    }
+
+    #[cfg(test)]
+    fn tracks_generation(&self, request_id: u64, session_id: u64) -> bool {
+        self.committed_generated_tokens
+            .lock()
+            .unwrap()
+            .contains_key(&(request_id, session_id))
     }
 
     fn commit_final_suffix(
@@ -494,7 +443,7 @@ impl ActivePlugin {
         };
         let mut operation = 0;
         let status = unsafe {
-            (self.definition.api().start_proposal)(self.instance()?, &event, &raw mut operation)
+            (self.definition.callbacks.start_proposal)(self.instance()?, &event, &raw mut operation)
         };
         self.call_status("start proposal", status)?;
         self.poll_until_deadline(operation, query.deadline, query.max_proposal_tokens)
@@ -533,7 +482,7 @@ impl ActivePlugin {
                 token_length: 0,
             };
             let status = unsafe {
-                (self.definition.api().poll_proposal)(instance, operation, &raw mut output)
+                (self.definition.callbacks.poll_proposal)(instance, operation, &raw mut output)
             };
             match status {
                 abi::ProposalPollStatus::PENDING => {
@@ -549,18 +498,18 @@ impl ActivePlugin {
                         "poll proposal",
                         abi::PluginStatus::INTERNAL_ERROR,
                     );
-                    unsafe { (self.definition.api().cancel_proposal)(instance, operation) };
+                    unsafe { (self.definition.callbacks.cancel_proposal)(instance, operation) };
                     return Err(error);
                 }
                 abi::ProposalPollStatus::READY => {
                     let proposal = proposal_from_output(&decision_id, token_ids, &output);
                     if proposal.is_err() {
-                        unsafe { (self.definition.api().cancel_proposal)(instance, operation) };
+                        unsafe { (self.definition.callbacks.cancel_proposal)(instance, operation) };
                     }
                     return proposal.map(Some);
                 }
                 unknown => {
-                    unsafe { (self.definition.api().cancel_proposal)(instance, operation) };
+                    unsafe { (self.definition.callbacks.cancel_proposal)(instance, operation) };
                     bail!(
                         "native serving plugin returned unknown proposal poll status {}",
                         unknown.0
@@ -568,7 +517,7 @@ impl ActivePlugin {
                 }
             }
         }
-        unsafe { (self.definition.api().cancel_proposal)(instance, operation) };
+        unsafe { (self.definition.callbacks.cancel_proposal)(instance, operation) };
         Ok(None)
     }
 
@@ -597,7 +546,8 @@ impl ActivePlugin {
             canonical_position: receipt.canonical_position,
             trimmed_rows: u64::try_from(receipt.trimmed_rows)?,
         };
-        let status = unsafe { (self.definition.api().report_proposal)(self.instance()?, &event) };
+        let status =
+            unsafe { (self.definition.callbacks.report_proposal)(self.instance()?, &event) };
         self.call_status("report proposal", status)
     }
 
@@ -607,7 +557,8 @@ impl ActivePlugin {
             decision_id: abi::ByteSlice::from_bytes(decision_id),
             reason: convert_discard_reason(reason),
         };
-        let status = unsafe { (self.definition.api().discard_proposal)(self.instance()?, &event) };
+        let status =
+            unsafe { (self.definition.callbacks.discard_proposal)(self.instance()?, &event) };
         self.call_status("discard proposal", status)
     }
 
@@ -615,7 +566,7 @@ impl ActivePlugin {
         let Some(instance) = self.instance.take() else {
             return Ok(());
         };
-        let status = unsafe { (self.definition.api().shutdown)(instance.as_ptr()) };
+        let status = unsafe { (self.definition.callbacks.shutdown)(instance.as_ptr()) };
         self.call_status("shutdown", status)
     }
 }
@@ -632,18 +583,34 @@ struct NativeLifecycleIngress {
     driver: Arc<PluginDriver>,
 }
 
+impl NativeLifecycleIngress {
+    /// Queues a generation's abort on the recovery path, so an earlier plugin
+    /// callback failure cannot strand the generation's active state.
+    fn submit_abort(&self, abort: GenerationAbort) -> Result<()> {
+        let delivery = self.driver.enqueue_recovery(PluginCommand::Abort(abort));
+        self.driver
+            .retire_if_undelivered(abort.request_id, abort.session_id, delivery)
+    }
+}
+
 impl GenerationLifecycleIngress for NativeLifecycleIngress {
     fn try_submit(&self, observation: GenerationLifecycleObservation) -> Result<()> {
-        let command = match observation {
-            GenerationLifecycleObservation::Started(start) => PluginCommand::Begin(start),
-            GenerationLifecycleObservation::Committed(commit) => PluginCommand::Committed(commit),
-            GenerationLifecycleObservation::Aborted(abort) => {
-                return self.driver.enqueue_recovery(PluginCommand::Abort(abort));
+        match observation {
+            GenerationLifecycleObservation::Started(start) => {
+                self.driver.enqueue(PluginCommand::Begin(start))
             }
-            GenerationLifecycleObservation::Completed(receipt) => PluginCommand::Finish(receipt),
-            _ => return Ok(()),
-        };
-        self.driver.enqueue(command)
+            GenerationLifecycleObservation::Committed(commit) => {
+                self.driver.enqueue(PluginCommand::Committed(commit))
+            }
+            GenerationLifecycleObservation::Aborted(abort) => self.submit_abort(abort),
+            GenerationLifecycleObservation::Completed(receipt) => {
+                let (request_id, session_id) = (receipt.request_id, receipt.session_id);
+                let delivery = self.driver.enqueue(PluginCommand::Finish(receipt));
+                self.driver
+                    .retire_if_undelivered(request_id, session_id, delivery)
+            }
+            _ => Ok(()),
+        }
     }
 
     fn delivery_failures(&self) -> u64 {
@@ -652,11 +619,8 @@ impl GenerationLifecycleIngress for NativeLifecycleIngress {
 
     fn receipt_unavailable(&self, unavailable: &GenerationAbort) {
         // Receipt construction can fail after generation has already
-        // succeeded.  Use the recovery path so an earlier plugin callback
-        // failure cannot strand the generation's active state.
-        let _ = self
-            .driver
-            .enqueue_recovery(PluginCommand::Abort(*unavailable));
+        // succeeded.
+        let _ = self.submit_abort(*unavailable);
     }
 }
 
@@ -792,24 +756,9 @@ fn path_slice(path: &Path) -> abi::ByteSlice {
     abi::ByteSlice::from_bytes(path.as_os_str().as_encoded_bytes())
 }
 
-unsafe fn read_utf8(slice: abi::ByteSlice, label: &str) -> Result<String> {
-    if slice.pointer.is_null() && slice.length != 0 {
-        bail!("native serving plugin {label} has a null pointer");
-    }
-    let bytes = if slice.length == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(slice.pointer, slice.length) }
-    };
-    std::str::from_utf8(bytes)
-        .with_context(|| format!("native serving plugin {label} is not UTF-8"))
-        .map(ToOwned::to_owned)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::fake_table;
 
     #[test]
     fn output_validation_is_fail_closed() {
@@ -839,28 +788,6 @@ mod tests {
         let after = unsafe { monotonic_now_ns(std::ptr::null_mut()) };
         assert!(deadline >= before.saturating_add(1_000_000));
         assert!(deadline <= after.saturating_add(10_000_000));
-    }
-
-    #[test]
-    fn table_validation_rejects_version_and_layout_mismatches() {
-        let mut table = fake_table();
-        assert_eq!(validate_table(&table).unwrap(), "test-serving-plugin");
-
-        table.abi_version += 1;
-        assert!(
-            validate_table(&table)
-                .unwrap_err()
-                .to_string()
-                .contains("incompatible")
-        );
-        table.abi_version = abi::NATIVE_SERVING_PLUGIN_ABI_V2;
-        table.struct_size -= 1;
-        assert!(
-            validate_table(&table)
-                .unwrap_err()
-                .to_string()
-                .contains("table size")
-        );
     }
 
     #[test]
@@ -1018,5 +945,40 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.to_string().contains("at 1 tokens, expected 2"));
+    }
+
+    #[test]
+    fn a_failed_finish_still_retires_its_generation() {
+        let (active, _) = test_support::fake_active_with_events(Duration::ZERO);
+        active
+            .begin(&GenerationStart {
+                request_id: 1,
+                session_id: 2,
+                agent_session_id: None,
+                prompt_token_ids: Arc::from([3]),
+                frontend_request_id: None,
+            })
+            .unwrap();
+        active
+            .committed(&GenerationCommit {
+                request_id: 1,
+                session_id: 2,
+                generated_token_count: 2,
+                token_ids: vec![4, 5].into_boxed_slice(),
+            })
+            .unwrap();
+
+        // The receipt has fewer generated tokens than were committed, so the
+        // final commit fails before the finish callback.
+        let error = active
+            .finish(&GenerationReceipt::test_fixture(
+                1,
+                2,
+                skippy_serving::frontend::GenerationTermination::MaxTokens,
+            ))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("committed beyond"));
+        assert_eq!(active.tracked_generation_count(), 0);
     }
 }
