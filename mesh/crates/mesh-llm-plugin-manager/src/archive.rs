@@ -1,10 +1,11 @@
+mod unpack;
+
 use std::{
     fs,
     path::{Component, Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
-use flate2::read::GzDecoder;
 
 use crate::{
     plugin_toml::read_plugin_toml,
@@ -67,10 +68,12 @@ pub fn stage_plugin_archive(
         .tempdir()
         .context("create plugin extract staging directory")?;
 
-    match archive_ext {
-        ArchiveExt::TarGz => extract_tar_gz(archive_path, staging.path())?,
-        ArchiveExt::Zip => extract_zip(archive_path, staging.path())?,
-    }
+    unpack::unpack_archive(
+        archive_path,
+        archive_ext,
+        staging.path(),
+        unpack::UnpackLimits::PLUGIN,
+    )?;
 
     let extracted_root = find_plugin_root(staging.path(), plugin_name)?;
     validate_plugin_root(&extracted_root, plugin_name, executable_suffix)?;
@@ -398,48 +401,6 @@ fn replace_plugin_dir(from: &Path, to: &Path, plugin_name: &str) -> Result<()> {
         }
     } else {
         move_dir(from, to).with_context(|| format!("install plugin to {}", to.display()))?;
-    }
-    Ok(())
-}
-
-fn extract_tar_gz(archive_path: &Path, destination: &Path) -> Result<()> {
-    let file = fs::File::open(archive_path)
-        .with_context(|| format!("open plugin archive {}", archive_path.display()))?;
-    let decoder = GzDecoder::new(file);
-    let mut archive = tar::Archive::new(decoder);
-    archive
-        .unpack(destination)
-        .with_context(|| format!("extract plugin archive {}", archive_path.display()))?;
-    Ok(())
-}
-
-fn extract_zip(archive_path: &Path, destination: &Path) -> Result<()> {
-    let file = fs::File::open(archive_path)
-        .with_context(|| format!("open plugin archive {}", archive_path.display()))?;
-    let mut archive = zip::ZipArchive::new(file)
-        .with_context(|| format!("read plugin zip archive {}", archive_path.display()))?;
-    for index in 0..archive.len() {
-        let mut file = archive.by_index(index)?;
-        let Some(enclosed) = file.enclosed_name() else {
-            bail!(
-                "zip archive contains unsafe path: {}",
-                String::from_utf8_lossy(file.name_raw())
-            );
-        };
-        let output_path = destination.join(enclosed);
-        if file.is_dir() {
-            fs::create_dir_all(&output_path)
-                .with_context(|| format!("create zip directory {}", output_path.display()))?;
-        } else {
-            if let Some(parent) = output_path.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("create zip parent directory {}", parent.display()))?;
-            }
-            let mut output = fs::File::create(&output_path)
-                .with_context(|| format!("create zip output {}", output_path.display()))?;
-            std::io::copy(&mut file, &mut output)
-                .with_context(|| format!("write zip output {}", output_path.display()))?;
-        }
     }
     Ok(())
 }
