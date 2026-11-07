@@ -26,7 +26,7 @@ use super::files::{
     extract_xet_hash, matches_any_glob,
 };
 use super::{FileMetadataInfo, HFRepository, RepoTreeEntry, RepoType};
-use crate::cache::storage as cache;
+use crate::cache::{path_admission::admit_repo_file_name, storage as cache};
 use crate::error::{HFError, HFResult};
 use crate::progress::{DownloadEvent, EmitEvent, FileProgress, FileStatus, Progress};
 use crate::{constants, retry};
@@ -74,6 +74,7 @@ impl<T: RepoType> HFRepository<T> {
     }
 
     async fn download_file_inner(&self, params: &DownloadFileParams) -> HFResult<PathBuf> {
+        admit_repo_file_name(&params.filename)?;
         if params.local_dir.is_some() {
             self.download_file_to_local_dir(params).await
         } else {
@@ -351,11 +352,11 @@ impl<T: RepoType> HFRepository<T> {
         };
 
         if let Some(ref hash) = commit_hash {
-            let snap = cache::snapshot_path(cache_dir, repo_folder, hash, filename);
+            let snap = cache::snapshot_path(cache_dir, repo_folder, hash, filename)?;
             if snap.exists() {
                 return Ok(snap);
             }
-            if cache::no_exist_path(cache_dir, repo_folder, hash, filename).exists() {
+            if cache::no_exist_path(cache_dir, repo_folder, hash, filename)?.exists() {
                 return Err(HFError::EntryNotFound {
                     path: filename.to_string(),
                     repo_id: String::new(),
@@ -389,7 +390,7 @@ impl<T: RepoType> HFRepository<T> {
         };
 
         let hash = commit_hash?;
-        let snap = cache::snapshot_path(cache_dir, repo_folder, &hash, filename);
+        let snap = cache::snapshot_path(cache_dir, repo_folder, &hash, filename).ok()?;
         let target = std::fs::read_link(&snap).ok()?;
         target.file_name()?.to_str().map(|s| s.to_string())
     }
@@ -404,7 +405,7 @@ impl<T: RepoType> HFRepository<T> {
         let force_download = params.force_download;
 
         if cache::is_commit_hash(revision) && !force_download {
-            let snap = cache::snapshot_path(cache_dir, &repo_folder, revision, &params.filename);
+            let snap = cache::snapshot_path(cache_dir, &repo_folder, revision, &params.filename)?;
             if snap.exists() {
                 return Ok(snap);
             }
@@ -546,7 +547,7 @@ impl<T: RepoType> HFRepository<T> {
         });
 
         let snapshot_path =
-            cache::snapshot_path(cache_dir, repo_folder, &commit_hash, &params.filename);
+            cache::snapshot_path(cache_dir, repo_folder, &commit_hash, &params.filename)?;
         if snapshot_path.exists() && !force_download {
             params.progress.emit(DownloadEvent::Progress {
                 files: vec![FileProgress {
@@ -811,6 +812,7 @@ impl<T: RepoType> HFRepository<T> {
         while let Some(entry) = stream.next().await {
             let entry = entry?;
             if let RepoTreeEntry::File { path, .. } = entry {
+                admit_repo_file_name(&path)?;
                 filenames.push(path);
             }
         }
@@ -875,7 +877,9 @@ impl<T: RepoType> HFRepository<T> {
         let mut cached_filenames = Vec::new();
         if !force && params.local_dir.is_none() {
             filenames.retain(|f| {
-                if cache::snapshot_path(cache_dir, &repo_folder, &commit_hash, f).exists() {
+                if cache::snapshot_path(cache_dir, &repo_folder, &commit_hash, f)
+                    .is_ok_and(|path| path.exists())
+                {
                     cached_filenames.push(f.clone());
                     false
                 } else {
@@ -906,7 +910,7 @@ impl<T: RepoType> HFRepository<T> {
                     if resp.status() == reqwest::StatusCode::NOT_FOUND {
                         if let Some(commit) = extract_commit_hash(&resp) {
                             let commit = admit_commit(&commit, &commit_hash)?;
-                            let no_exist = cache::no_exist_path(cache_dir, &repo_folder, &commit, &filename);
+                            let no_exist = cache::no_exist_path(cache_dir, &repo_folder, &commit, &filename)?;
                             if let Some(parent) = no_exist.parent() {
                                 let _ = std::fs::create_dir_all(parent);
                             }
@@ -1044,7 +1048,7 @@ impl<T: RepoType> HFRepository<T> {
         for meta in file_metas {
             let blob = cache::blob_path(cache_dir, &repo_folder, &meta.etag);
             let pointer =
-                cache::snapshot_path(cache_dir, &repo_folder, &meta.commit_hash, &meta.filename);
+                cache::snapshot_path(cache_dir, &repo_folder, &meta.commit_hash, &meta.filename)?;
             if pointer.exists() && !force {
                 cached_progress.push(FileProgress {
                     filename: meta.filename.clone(),
@@ -1174,7 +1178,10 @@ async fn mark_no_exist_and_return_error(
             Ok(commit) => commit,
             Err(error) => return error,
         };
-        let no_exist = cache::no_exist_path(cache_dir, repo_folder, &commit_hash, filename);
+        let no_exist = match cache::no_exist_path(cache_dir, repo_folder, &commit_hash, filename) {
+            Ok(path) => path,
+            Err(error) => return error,
+        };
         if let Some(parent) = no_exist.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -1204,12 +1211,7 @@ async fn finalize_cached_file(
     }
     cache::create_pointer_symlink(cache_dir, repo_folder, commit_hash, filename, etag, source)
         .await?;
-    Ok(cache::snapshot_path(
-        cache_dir,
-        repo_folder,
-        commit_hash,
-        filename,
-    ))
+    cache::snapshot_path(cache_dir, repo_folder, commit_hash, filename)
 }
 
 fn build_download_params(
@@ -1424,7 +1426,8 @@ mod fallback_tests {
 
         let dir = tempfile::tempdir().unwrap();
         let snapshot =
-            cache::snapshot_path(dir.path(), "models--owner--repo", TEST_COMMIT, "model.bin");
+            cache::snapshot_path(dir.path(), "models--owner--repo", TEST_COMMIT, "model.bin")
+                .unwrap();
         std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
         std::fs::write(&snapshot, b"cached without symlink").unwrap();
         cache::write_ref(dir.path(), "models--owner--repo", "main", TEST_COMMIT)

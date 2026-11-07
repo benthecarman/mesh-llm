@@ -3,6 +3,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use super::path_admission::{admit_ref_location, admit_repo_file_name};
 use super::{CachedFileInfo, CachedRepoInfo, CachedRevisionInfo, HFCacheInfo};
 
 pub(crate) struct CacheLock {
@@ -81,6 +82,7 @@ pub(crate) async fn write_ref(
     revision: &str,
     commit_hash: &str,
 ) -> crate::error::HFResult<()> {
+    admit_ref_location(repo_folder, revision)?;
     let path = ref_path(cache_dir, repo_folder, revision);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -103,19 +105,7 @@ pub(crate) fn read_ref_sync(
     revision: &str,
 ) -> crate::error::HFResult<Option<String>> {
     use std::io::Read as _;
-    let safe = |value: &str| {
-        !value.is_empty()
-            && value != "."
-            && value != ".."
-            && !value
-                .chars()
-                .any(|ch| ch.is_control() || matches!(ch, '\\' | ':' | '/'))
-    };
-    if !safe(repo_folder) || !revision.split('/').all(safe) {
-        return Err(crate::error::HFError::InvalidParameter(
-            "unsafe cached reference path".into(),
-        ));
-    }
+    admit_ref_location(repo_folder, revision)?;
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -153,7 +143,7 @@ pub(crate) async fn create_pointer_symlink(
     etag: &str,
     source: PointerSource,
 ) -> crate::error::HFResult<()> {
-    let pointer = snapshot_path(cache_dir, repo_folder, commit_hash, filename);
+    let pointer = snapshot_path(cache_dir, repo_folder, commit_hash, filename)?;
     if let Some(parent) = pointer.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -224,12 +214,13 @@ pub(crate) fn snapshot_path(
     repo_folder: &str,
     commit_hash: &str,
     filename: &str,
-) -> PathBuf {
-    cache_dir
+) -> crate::error::HFResult<PathBuf> {
+    admit_repo_file_name(filename)?;
+    Ok(cache_dir
         .join(repo_folder)
         .join("snapshots")
         .join(commit_hash)
-        .join(filename)
+        .join(filename))
 }
 
 pub(crate) fn ref_path(cache_dir: &Path, repo_folder: &str, revision: &str) -> PathBuf {
@@ -248,12 +239,13 @@ pub(crate) fn no_exist_path(
     repo_folder: &str,
     commit_hash: &str,
     filename: &str,
-) -> PathBuf {
-    cache_dir
+) -> crate::error::HFResult<PathBuf> {
+    admit_repo_file_name(filename)?;
+    Ok(cache_dir
         .join(repo_folder)
         .join(".no_exist")
         .join(commit_hash)
-        .join(filename)
+        .join(filename))
 }
 
 fn parse_repo_folder_name(name: &str) -> Option<(&'static str, String)> {
@@ -537,7 +529,7 @@ mod tests {
     #[test]
     fn test_snapshot_path() {
         assert_eq!(
-            snapshot_path(Path::new("/cache"), "models--gpt2", "aaa111", "config.json"),
+            snapshot_path(Path::new("/cache"), "models--gpt2", "aaa111", "config.json").unwrap(),
             PathBuf::from("/cache/models--gpt2/snapshots/aaa111/config.json")
         );
     }
@@ -550,7 +542,8 @@ mod tests {
                 "models--gpt2",
                 "aaa111",
                 "subdir/model.bin"
-            ),
+            )
+            .unwrap(),
             PathBuf::from("/cache/models--gpt2/snapshots/aaa111/subdir/model.bin")
         );
     }
@@ -587,9 +580,43 @@ mod tests {
                 "models--gpt2",
                 "aaa111",
                 "missing.json"
-            ),
+            )
+            .unwrap(),
             PathBuf::from("/cache/models--gpt2/.no_exist/aaa111/missing.json")
         );
+    }
+
+    #[tokio::test]
+    async fn remote_names_cannot_write_outside_the_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        let commit = "a".repeat(40);
+        let blob = blob_path(&cache, "models--gpt2", "abc123");
+        std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+        std::fs::write(&blob, b"blob").unwrap();
+        for name in ["../../../../escape", "/absolute-escape", ""] {
+            assert!(snapshot_path(&cache, "models--gpt2", &commit, name).is_err());
+            assert!(no_exist_path(&cache, "models--gpt2", &commit, name).is_err());
+            let pointer = create_pointer_symlink(
+                &cache,
+                "models--gpt2",
+                &commit,
+                name,
+                "abc123",
+                PointerSource::ExistingBlob,
+            );
+            assert!(pointer.await.is_err(), "{name:?}");
+        }
+        for revision in [
+            "../../../escape",
+            "refs/../../../../escape",
+            "/absolute-escape",
+        ] {
+            let written = write_ref(&cache, "models--gpt2", revision, &commit).await;
+            assert!(written.is_err(), "{revision:?}");
+        }
+        assert!(!root.path().join("escape").exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     }
 
     #[tokio::test]
@@ -668,7 +695,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let pointer = snapshot_path(cache, "models--gpt2", "def456", "config.json");
+        let pointer = snapshot_path(cache, "models--gpt2", "def456", "config.json").unwrap();
         assert!(pointer.exists());
         assert!(pointer.symlink_metadata().unwrap().file_type().is_symlink());
         let content = std::fs::read_to_string(&pointer).unwrap();
@@ -693,7 +720,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let pointer = snapshot_path(cache, "models--gpt2", "def456", "subdir/model.bin");
+        let pointer = snapshot_path(cache, "models--gpt2", "def456", "subdir/model.bin").unwrap();
         assert!(pointer.exists());
         assert!(pointer.symlink_metadata().unwrap().file_type().is_symlink());
         let target = std::fs::read_link(&pointer).unwrap();
@@ -931,7 +958,7 @@ mod tests {
             ("models--unsloth--one", "c".repeat(40), "one-Q4_K_M.gguf"),
             ("models--unsloth--two", "d".repeat(40), "two-Q4_K_M.gguf"),
         ] {
-            let snapshot = snapshot_path(cache, repo_folder, &commit, file);
+            let snapshot = snapshot_path(cache, repo_folder, &commit, file).unwrap();
             std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
             std::fs::write(&snapshot, b"gguf").unwrap();
             write_ref(cache, repo_folder, "main", &commit)

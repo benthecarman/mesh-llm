@@ -21,6 +21,7 @@ use bon::bon;
 use crate::client::HFClient;
 use crate::error::HFResult;
 
+pub(crate) mod path_admission;
 pub(crate) mod storage;
 
 /// A single file in a cached revision.
