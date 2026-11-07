@@ -16,6 +16,7 @@ mod kv_pages;
 mod laya;
 pub mod logging;
 mod media;
+mod model_context;
 mod native;
 mod native_mtp;
 mod native_test_evidence;

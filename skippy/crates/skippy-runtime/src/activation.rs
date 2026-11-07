@@ -13,6 +13,7 @@ use skippy_ffi::{
 
 use crate::dflash::DecodedRows;
 use crate::error::{ensure_ok, free_error};
+use crate::model_context::HeldContexts;
 use crate::session::StageSession;
 use crate::types::empty_raw_activation_desc;
 use crate::{
@@ -104,6 +105,7 @@ impl StageSession {
         input: Option<&ActivationFrame>,
         output_capacity: usize,
     ) -> Result<(RawActivationDesc, Vec<u8>)> {
+        let native = self.native.lock();
         let raw_input = raw_input_frame(input)?;
         let input_desc_ptr = raw_input_desc_ptr(&raw_input);
         let input_payload_ptr = raw_input.1;
@@ -114,7 +116,7 @@ impl StageSession {
         let status = unsafe {
             if positions.is_empty() {
                 skippy_ffi::skippy_prefill_chunk_frame(
-                    self.raw,
+                    native.raw(),
                     token_ids.as_ptr(),
                     token_ids.len(),
                     input_desc_ptr,
@@ -127,7 +129,7 @@ impl StageSession {
                 )
             } else {
                 skippy_ffi::skippy_prefill_chunk_frame_with_positions(
-                    self.raw,
+                    native.raw(),
                     token_ids.as_ptr(),
                     token_ids.len(),
                     positions.as_ptr(),
@@ -206,6 +208,7 @@ impl StageSession {
         input: Option<&ActivationFrame>,
         output_capacity: usize,
     ) -> Result<(i32, RawActivationDesc, Vec<u8>)> {
+        let native = self.native.lock();
         let raw_input = raw_input_frame(input)?;
         let input_desc_ptr = raw_input_desc_ptr(&raw_input);
         let input_payload_ptr = raw_input.1;
@@ -221,7 +224,7 @@ impl StageSession {
         let status = unsafe {
             if positions.is_empty() {
                 skippy_ffi::skippy_prefill_chunk_frame_sampled(
-                    self.raw,
+                    native.raw(),
                     token_ids.as_ptr(),
                     token_ids.len(),
                     sampling_ptr,
@@ -236,7 +239,7 @@ impl StageSession {
                 )
             } else {
                 skippy_ffi::skippy_prefill_chunk_frame_sampled_with_positions(
-                    self.raw,
+                    native.raw(),
                     token_ids.as_ptr(),
                     token_ids.len(),
                     positions.as_ptr(),
@@ -333,6 +336,7 @@ impl StageSession {
         input: Option<&ActivationFrame>,
         output_capacity: usize,
     ) -> Result<(i32, RawActivationDesc, Vec<u8>)> {
+        let native = self.native.lock();
         let raw_input = raw_input_frame(input)?;
         let input_desc_ptr = raw_input_desc_ptr(&raw_input);
         let input_payload_ptr = raw_input.1;
@@ -347,7 +351,7 @@ impl StageSession {
             .map_or(ptr::null(), |sampling| sampling as *const RawSamplingConfig);
         let status = unsafe {
             skippy_ffi::skippy_decode_step_frame_sampled(
-                self.raw,
+                native.raw(),
                 token_id,
                 sampling_ptr,
                 input_desc_ptr,
@@ -382,6 +386,7 @@ impl StageSession {
         output_capacity: usize,
         max_draft_tokens: usize,
     ) -> Result<(i32, Option<NativeMtpDraft>, RawActivationDesc, Vec<u8>)> {
+        let native = self.native.lock();
         let raw_input = raw_input_frame(input)?;
         let input_desc_ptr = raw_input_desc_ptr(&raw_input);
         let input_payload_ptr = raw_input.1;
@@ -397,7 +402,7 @@ impl StageSession {
             .map_or(ptr::null(), |sampling| sampling as *const RawSamplingConfig);
         let status = unsafe {
             skippy_ffi::skippy_decode_step_frame_sampled_mtp(
-                self.raw,
+                native.raw(),
                 token_id,
                 sampling_ptr,
                 input_desc_ptr,
@@ -457,10 +462,11 @@ impl StageSession {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
+        let held = HeldContexts::lock(requests.iter().map(|request| &request.session.native));
         let sessions = requests
-            .iter_mut()
-            .map(|request| request.session.raw)
-            .collect::<Vec<_>>();
+            .iter()
+            .map(|request| request.session.native.raw_in(&held))
+            .collect::<Result<Vec<_>>>()?;
         let token_ids = requests
             .iter()
             .map(|request| request.token_id)
@@ -670,6 +676,7 @@ impl StageSession {
         output_capacity: usize,
         max_draft_tokens: usize,
     ) -> Result<RawVerifyFrameOutput> {
+        let native = self.native.lock();
         let raw_input = raw_input_frame(input)?;
         let input_desc_ptr = raw_input_desc_ptr(&raw_input);
         let input_payload_ptr = raw_input.1;
@@ -686,7 +693,7 @@ impl StageSession {
             .map_or(ptr::null(), |sampling| sampling as *const RawSamplingConfig);
         let status = unsafe {
             skippy_ffi::skippy_verify_tokens_frame_sampled(
-                self.raw,
+                native.raw(),
                 token_ids.as_ptr(),
                 token_ids.len(),
                 sampling_ptr,
@@ -748,6 +755,7 @@ impl StageSession {
         token_count: usize,
         output_capacity: usize,
     ) -> Result<(RawActivationDesc, Vec<u8>)> {
+        let native = self.native.lock();
         if token_count == 0 {
             return Err(anyhow!(
                 "copy_output_activation_frame requires at least one token"
@@ -759,7 +767,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_session_copy_output_activation_frame(
-                self.raw,
+                native.raw(),
                 token_count,
                 &mut output_desc,
                 output_payload.as_mut_ptr().cast(),
@@ -778,6 +786,7 @@ impl StageSession {
     }
 
     pub fn sample_current(&mut self, sampling: Option<&SamplingConfig>) -> Result<i32> {
+        let native = self.native.lock();
         let raw_sampling = sampling.map(SamplingConfig::as_raw).transpose()?;
         let sampling_ptr = raw_sampling
             .as_ref()
@@ -786,7 +795,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_session_sample_current(
-                self.raw,
+                native.raw(),
                 sampling_ptr,
                 &mut predicted,
                 &mut error,

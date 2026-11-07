@@ -4,11 +4,12 @@ use std::ptr;
 use anyhow::{Context, Result, anyhow};
 use skippy_ffi::{
     GenerationSignalWindow as RawGenerationSignalWindow, NativeMtpDraft as RawNativeMtpDraft,
-    SamplingConfig as RawSamplingConfig, Session as RawSession, TokenSignal as RawTokenSignal,
+    SamplingConfig as RawSamplingConfig, TokenSignal as RawTokenSignal,
 };
 
 use crate::dflash::DecodedRows;
 use crate::error::ensure_ok;
+use crate::model_context::{HeldContexts, NativeSession};
 use crate::{GenerationSignalWindow, NativeMtpDraft, SamplingConfig, TokenLogprobs, TokenSignal};
 
 const EMPTY_CHAT_GRAMMAR_METADATA: &str = r#"{"grammar":""}"#;
@@ -49,7 +50,8 @@ impl GraphReuseStats {
 }
 
 pub struct StageSession {
-    pub(crate) raw: *mut RawSession,
+    /// The native lane, reachable only while its model's context is locked.
+    pub(crate) native: NativeSession,
     pub(crate) token_count: u64,
     pub(crate) terminal_stage: bool,
     /// Whether one native batch may carry activation exports for more than one
@@ -80,8 +82,9 @@ fn validate_native_sequence_id(sequence_id: i32) -> Result<i32> {
     Ok(sequence_id)
 }
 
-// The experimental C ABI owns synchronization internally for model/session use.
-// Rust stage-server access is additionally serialized behind a Mutex.
+// Every session of a model is a lane in the model's one llama context, and
+// native code locks only lane claims. A session may move to another thread
+// because each use of its native handle holds the model's context lock.
 unsafe impl Send for StageSession {}
 
 impl StageSession {
@@ -89,12 +92,13 @@ impl StageSession {
     /// Native sampling retains its chat configuration and restarts acceptance
     /// over this history, including penalties and generated-token grammar state.
     pub fn restore_token_history(&mut self, token_ids: &[i32]) -> Result<()> {
+        let native = self.native.lock();
         let mut error = ptr::null_mut();
         // SAFETY: the session is owned by self and the token slice remains valid
         // for the call; native code copies the tokens and checks its position.
         let status = unsafe {
             skippy_ffi::skippy_session_restore_token_history(
-                self.raw,
+                native.raw(),
                 token_ids.as_ptr(),
                 token_ids.len(),
                 &mut error,
@@ -111,8 +115,9 @@ impl StageSession {
     /// deltas between builds -- an inference that cannot separate "reuse is
     /// firing and the residual cost is elsewhere" from "reuse is not firing".
     pub fn graph_reuse_stats(&self) -> Option<GraphReuseStats> {
+        let native = self.native.lock();
         let ctx: *mut skippy_ffi::Opaque =
-            unsafe { skippy_ffi::skippy_session_llama_context(self.raw) }.cast();
+            unsafe { skippy_ffi::skippy_session_llama_context(native.raw()) }.cast();
         if ctx.is_null() {
             return None;
         }
@@ -131,18 +136,21 @@ impl StageSession {
 
     /// Returns the position reported by the native runtime.
     pub fn native_position(&self) -> Result<u64> {
-        let native_position = unsafe { skippy_ffi::skippy_session_position(self.raw) };
+        let native = self.native.lock();
+        let native_position = unsafe { skippy_ffi::skippy_session_position(native.raw()) };
         native_position_to_u64(native_position)
     }
 
     /// Returns the native llama.cpp sequence used by this session.
     pub fn native_sequence_id(&self) -> Result<i32> {
-        let sequence_id = unsafe { skippy_ffi::skippy_session_sequence_id(self.raw) };
+        let native = self.native.lock();
+        let sequence_id = unsafe { skippy_ffi::skippy_session_sequence_id(native.raw()) };
         validate_native_sequence_id(sequence_id)
     }
 
     pub fn batch_size(&self) -> Result<usize> {
-        let n_batch = unsafe { skippy_ffi::skippy_session_batch_size(self.raw) };
+        let native = self.native.lock();
+        let n_batch = unsafe { skippy_ffi::skippy_session_batch_size(native.raw()) };
         if n_batch <= 0 {
             return Err(anyhow!("skippy session has no valid batch size"));
         }
@@ -150,8 +158,9 @@ impl StageSession {
     }
 
     pub fn reset(&mut self) -> Result<()> {
+        let native = self.native.lock();
         let mut error = ptr::null_mut();
-        let status = unsafe { skippy_ffi::skippy_session_reset(self.raw, &mut error) };
+        let status = unsafe { skippy_ffi::skippy_session_reset(native.raw(), &mut error) };
         ensure_ok(status, error)?;
         self.token_count = 0;
         self.dflash_after_replace();
@@ -160,6 +169,7 @@ impl StageSession {
 
     /// Produce one native pooled vector with a positive, caller-verified dimension.
     pub fn embed(&mut self, token_ids: &[i32], dimensions: usize) -> Result<Vec<f32>> {
+        let native = self.native.lock();
         if dimensions == 0 {
             return Err(anyhow!("embedding dimensions must be greater than zero"));
         }
@@ -168,7 +178,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_session_embed(
-                self.raw,
+                native.raw(),
                 token_ids.as_ptr(),
                 token_ids.len(),
                 output.as_mut_ptr(),
@@ -189,6 +199,7 @@ impl StageSession {
 
     /// Score a query/document pair and return the native template's consumed tokens.
     pub fn rerank(&mut self, query: &str, document: &str) -> Result<(f32, usize)> {
+        let native = self.native.lock();
         let query = CString::new(query).context("rerank query contains an interior NUL byte")?;
         let document =
             CString::new(document).context("rerank document contains an interior NUL byte")?;
@@ -197,7 +208,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_session_rerank(
-                self.raw,
+                native.raw(),
                 query.as_ptr(),
                 document.as_ptr(),
                 &mut score,
@@ -212,11 +223,12 @@ impl StageSession {
 
     /// Encode source tokens and reset decoder position, returning its first input token.
     pub fn encode_prompt(&mut self, token_ids: &[i32]) -> Result<i32> {
+        let native = self.native.lock();
         let mut decoder_start_token = 0_i32;
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_session_encode_prompt(
-                self.raw,
+                native.raw(),
                 token_ids.as_ptr(),
                 token_ids.len(),
                 &mut decoder_start_token,
@@ -234,6 +246,7 @@ impl StageSession {
         prompt_token_count: u64,
         sampling: Option<&SamplingConfig>,
     ) -> Result<()> {
+        let native = self.native.lock();
         let metadata_json = CString::new(chat_sampling_metadata_for_native(metadata_json))
             .context("chat sampling metadata contains an interior NUL byte")?;
         let raw_sampling = sampling.map(SamplingConfig::as_raw).transpose()?;
@@ -243,7 +256,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_session_configure_chat_sampling(
-                self.raw,
+                native.raw(),
                 sampling_ptr,
                 metadata_json.as_ptr(),
                 prompt_token_count,
@@ -255,10 +268,11 @@ impl StageSession {
 
     /// Retires the exact recovery checkpoint for a fully accepted verify window.
     pub fn retire_verify_checkpoint(&mut self, token_start: u64, token_count: u64) -> Result<()> {
+        let native = self.native.lock();
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_retire_verify_checkpoint(
-                self.raw,
+                native.raw(),
                 token_start,
                 token_count,
                 &mut error,
@@ -270,11 +284,12 @@ impl StageSession {
     /// How this session's verify windows were held for rollback since it was
     /// created or last reset.
     pub fn verify_rollback_counts(&self) -> Result<VerifyRollbackCounts> {
+        let native = self.native.lock();
         let mut counts = VerifyRollbackCounts::default();
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_session_verify_rollback_counts(
-                self.raw,
+                native.raw(),
                 &mut counts.in_place,
                 &mut counts.checkpointed,
                 &mut error,
@@ -285,8 +300,10 @@ impl StageSession {
     }
 
     pub fn trim_session(&mut self, token_count: u64) -> Result<()> {
+        let native = self.native.lock();
         let mut error = ptr::null_mut();
-        let status = unsafe { skippy_ffi::skippy_trim_session(self.raw, token_count, &mut error) };
+        let status =
+            unsafe { skippy_ffi::skippy_trim_session(native.raw(), token_count, &mut error) };
         ensure_ok(status, error)?;
         self.token_count = token_count;
         self.dflash_after_rewind();
@@ -294,10 +311,11 @@ impl StageSession {
     }
 
     pub fn set_position(&mut self, token_count: u64) -> Result<()> {
+        let native = self.native.lock();
         let n_past = i32::try_from(token_count).context("session position exceeds i32")?;
         let mut error = ptr::null_mut();
         let status =
-            unsafe { skippy_ffi::skippy_session_set_position(self.raw, n_past, &mut error) };
+            unsafe { skippy_ffi::skippy_session_set_position(native.raw(), n_past, &mut error) };
         ensure_ok(status, error)?;
         self.token_count = token_count;
         self.dflash_after_rewind();
@@ -305,18 +323,25 @@ impl StageSession {
     }
 
     pub fn save_prefix(&mut self, cache_seq_id: i32, token_count: u64) -> Result<()> {
+        let native = self.native.lock();
         let mut error = ptr::null_mut();
         let status = unsafe {
-            skippy_ffi::skippy_session_save_prefix(self.raw, cache_seq_id, token_count, &mut error)
+            skippy_ffi::skippy_session_save_prefix(
+                native.raw(),
+                cache_seq_id,
+                token_count,
+                &mut error,
+            )
         };
         ensure_ok(status, error)
     }
 
     pub fn restore_prefix(&mut self, cache_seq_id: i32, token_ids: &[i32]) -> Result<()> {
+        let native = self.native.lock();
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_session_restore_prefix(
-                self.raw,
+                native.raw(),
                 cache_seq_id,
                 token_ids.as_ptr(),
                 token_ids.len(),
@@ -330,28 +355,31 @@ impl StageSession {
     }
 
     pub fn drop_sequence(&mut self, seq_id: i32) -> Result<()> {
+        let native = self.native.lock();
         let mut error = ptr::null_mut();
         let status =
-            unsafe { skippy_ffi::skippy_session_drop_sequence(self.raw, seq_id, &mut error) };
+            unsafe { skippy_ffi::skippy_session_drop_sequence(native.raw(), seq_id, &mut error) };
         ensure_ok(status, error)
     }
 
     pub fn memory_used_cells(&mut self) -> Result<u64> {
+        let native = self.native.lock();
         let mut used_cells = 0u64;
         let mut error = ptr::null_mut();
         let status = unsafe {
-            skippy_ffi::skippy_session_memory_used_cells(self.raw, &mut used_cells, &mut error)
+            skippy_ffi::skippy_session_memory_used_cells(native.raw(), &mut used_cells, &mut error)
         };
         ensure_ok(status, error)?;
         Ok(used_cells)
     }
 
     pub fn prefill_chunk(&mut self, token_ids: &[i32]) -> Result<()> {
+        let native = self.native.lock();
         let mut output_bytes = 0usize;
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_prefill_chunk(
-                self.raw,
+                native.raw(),
                 token_ids.as_ptr(),
                 token_ids.len(),
                 ptr::null(),
@@ -391,6 +419,7 @@ impl StageSession {
         token_id: i32,
         sampling: Option<&SamplingConfig>,
     ) -> Result<i32> {
+        let native = self.native.lock();
         let mut output_bytes = 0usize;
         let mut predicted_token = 0_i32;
         let mut error = ptr::null_mut();
@@ -400,7 +429,7 @@ impl StageSession {
             .map_or(ptr::null(), |sampling| sampling as *const RawSamplingConfig);
         let status = unsafe {
             skippy_ffi::skippy_decode_step_sampled(
-                self.raw,
+                native.raw(),
                 token_id,
                 sampling_ptr,
                 ptr::null(),
@@ -427,6 +456,7 @@ impl StageSession {
         sampling: Option<&SamplingConfig>,
         max_draft_tokens: usize,
     ) -> Result<(i32, Option<NativeMtpDraft>)> {
+        let native = self.native.lock();
         if skippy_ffi::skippy_decode_step_sampled_mtp_fn().is_none() {
             let (predicted, draft, _) =
                 self.decode_step_frame_sampled_mtp(token_id, sampling, None, 0, max_draft_tokens)?;
@@ -442,7 +472,7 @@ impl StageSession {
             .map_or(ptr::null(), |sampling| sampling as *const RawSamplingConfig);
         let status = unsafe {
             skippy_ffi::skippy_decode_step_sampled_mtp(
-                self.raw,
+                native.raw(),
                 token_id,
                 sampling_ptr,
                 &mut predicted_token,
@@ -465,10 +495,11 @@ impl StageSession {
             return Ok(Vec::new());
         }
 
+        let held = HeldContexts::lock(requests.iter().map(|request| &request.session.native));
         let sessions = requests
-            .iter_mut()
-            .map(|request| request.session.raw)
-            .collect::<Vec<_>>();
+            .iter()
+            .map(|request| request.session.native.raw_in(&held))
+            .collect::<Result<Vec<_>>>()?;
         let token_ids = requests
             .iter()
             .map(|request| request.token_id)
@@ -513,10 +544,11 @@ impl StageSession {
     }
 
     pub fn last_token_signal(&mut self) -> Result<TokenSignal> {
+        let native = self.native.lock();
         let mut signal = RawTokenSignal::default();
         let mut error = ptr::null_mut();
         let status = unsafe {
-            skippy_ffi::skippy_session_last_token_signal(self.raw, &mut signal, &mut error)
+            skippy_ffi::skippy_session_last_token_signal(native.raw(), &mut signal, &mut error)
         };
         ensure_ok(status, error)?;
         Ok(signal.into())
@@ -525,11 +557,12 @@ impl StageSession {
     /// Moves out the log-probabilities recorded for every token sampled with a
     /// config that set `top_logprobs`, oldest first.
     pub fn take_token_logprobs(&mut self) -> Result<Vec<TokenLogprobs>> {
+        let native = self.native.lock();
         let mut pending = 0_usize;
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_session_take_token_logprobs(
-                self.raw,
+                native.raw(),
                 ptr::null_mut(),
                 0,
                 &mut pending,
@@ -545,7 +578,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_session_take_token_logprobs(
-                self.raw,
+                native.raw(),
                 raw.as_mut_ptr(),
                 raw.len(),
                 &mut taken,
@@ -558,11 +591,12 @@ impl StageSession {
     }
 
     pub fn signal_window(&mut self, window_tokens: u32) -> Result<GenerationSignalWindow> {
+        let native = self.native.lock();
         let mut window = RawGenerationSignalWindow::default();
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_session_signal_window(
-                self.raw,
+                native.raw(),
                 window_tokens,
                 &mut window,
                 &mut error,
@@ -577,6 +611,7 @@ impl StageSession {
     /// Call [`Self::retire_verify_checkpoint`] when the complete window is accepted,
     /// or [`Self::trim_session`] when any suffix is rejected.
     pub fn verify_tokens(&mut self, token_ids: &[i32]) -> Result<Vec<i32>> {
+        let native = self.native.lock();
         if token_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -585,7 +620,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_verify_tokens(
-                self.raw,
+                native.raw(),
                 token_ids.as_ptr(),
                 token_ids.len(),
                 predicted.as_mut_ptr(),
@@ -633,10 +668,13 @@ impl StageSession {
 
 impl Drop for StageSession {
     fn drop(&mut self) {
-        if !self.raw.is_null() {
-            unsafe {
-                let _ = skippy_ffi::skippy_session_free(self.raw, ptr::null_mut());
-            }
+        if self.native.is_null() {
+            return;
+        }
+        // Freeing releases the lane's cells in the shared context.
+        let native = self.native.lock();
+        unsafe {
+            let _ = skippy_ffi::skippy_session_free(native.raw(), ptr::null_mut());
         }
     }
 }

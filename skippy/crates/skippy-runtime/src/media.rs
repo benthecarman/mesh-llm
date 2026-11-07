@@ -246,8 +246,10 @@ impl StageModel {
             .map(CString::new)
             .transpose()
             .context("speech language contains an interior NUL byte")?;
+        // Media decodes run on the context every session shares.
+        let native = session.native.lock();
         let lctx: *mut skippy_ffi::Opaque =
-            unsafe { skippy_ffi::skippy_session_llama_context(session.raw) }.cast();
+            unsafe { skippy_ffi::skippy_session_llama_context(native.raw()) }.cast();
         if lctx.is_null() {
             return Err(anyhow!("speech session did not expose a llama context"));
         }
@@ -296,17 +298,17 @@ impl StageModel {
         session.reset()?;
         unsafe { skippy_ffi::llama_set_embeddings(lctx, true) };
         let mut embeddings_mode = SpeechEmbeddingsGuard {
-            session: session.raw,
+            session: native.raw(),
             context: lctx,
             active: true,
         };
         let mut guard_error = ptr::null_mut();
         let status = unsafe {
-            skippy_ffi::skippy_session_begin_external_decode(session.raw, &mut guard_error)
+            skippy_ffi::skippy_session_begin_external_decode(native.raw(), &mut guard_error)
         };
         ensure_ok(status, guard_error)?;
         let mut external_decode = ExternalDecodeGuard {
-            session: session.raw,
+            session: native.raw(),
             active: true,
         };
         let generator =
@@ -552,17 +554,19 @@ impl StageModel {
         if token_count == 0 {
             return Err(anyhow!("multimodal prompt produced no tokens"));
         }
-        let n_past = unsafe { skippy_ffi::skippy_session_position(session.raw) };
+        // Media decodes run on the context every session shares.
+        let native = session.native.lock();
+        let n_past = unsafe { skippy_ffi::skippy_session_position(native.raw()) };
         if n_past < 0 {
             return Err(anyhow!("skippy session is not initialized"));
         }
         let seq_id = session.native_sequence_id()?;
-        let n_batch = unsafe { skippy_ffi::skippy_session_batch_size(session.raw) };
+        let n_batch = unsafe { skippy_ffi::skippy_session_batch_size(native.raw()) };
         if n_batch <= 0 {
             return Err(anyhow!("skippy session has no valid batch size"));
         }
         let lctx: *mut skippy_ffi::Opaque =
-            unsafe { skippy_ffi::skippy_session_llama_context(session.raw) }.cast();
+            unsafe { skippy_ffi::skippy_session_llama_context(native.raw()) }.cast();
         if lctx.is_null() {
             return Err(anyhow!(
                 "skippy session did not expose a llama_context handle"
@@ -570,7 +574,7 @@ impl StageModel {
         }
         let mut guard_error = ptr::null_mut();
         let guard_status = unsafe {
-            skippy_ffi::skippy_session_begin_external_decode(session.raw, &mut guard_error)
+            skippy_ffi::skippy_session_begin_external_decode(native.raw(), &mut guard_error)
         };
         ensure_ok(guard_status, guard_error)?;
 
@@ -586,7 +590,7 @@ impl StageModel {
             }
         }
 
-        let _external_decode_guard = ExternalDecodeGuard(session.raw);
+        let _external_decode_guard = ExternalDecodeGuard(native.raw());
 
         let mut new_n_past = 0_i32;
         let eval_status = unsafe {
@@ -608,8 +612,9 @@ impl StageModel {
         }
 
         let mut error = ptr::null_mut();
-        let status =
-            unsafe { skippy_ffi::skippy_session_set_position(session.raw, new_n_past, &mut error) };
+        let status = unsafe {
+            skippy_ffi::skippy_session_set_position(native.raw(), new_n_past, &mut error)
+        };
         ensure_ok(status, error)?;
         session.token_count =
             u64::try_from(new_n_past).context("multimodal position is negative")?;
@@ -741,17 +746,19 @@ impl StageModel {
         if token_count == 0 {
             return Err(anyhow!("multimodal prompt produced no tokens"));
         }
-        let mut n_past = unsafe { skippy_ffi::skippy_session_position(session.raw) };
+        // Media decodes run on the context every session shares.
+        let native = session.native.lock();
+        let mut n_past = unsafe { skippy_ffi::skippy_session_position(native.raw()) };
         if n_past < 0 {
             return Err(anyhow!("skippy session is not initialized"));
         }
         let seq_id = session.native_sequence_id()?;
-        let n_batch = unsafe { skippy_ffi::skippy_session_batch_size(session.raw) };
+        let n_batch = unsafe { skippy_ffi::skippy_session_batch_size(native.raw()) };
         if n_batch <= 0 {
             return Err(anyhow!("skippy session has no valid batch size"));
         }
         let lctx: *mut skippy_ffi::Opaque =
-            unsafe { skippy_ffi::skippy_session_llama_context(session.raw) }.cast();
+            unsafe { skippy_ffi::skippy_session_llama_context(native.raw()) }.cast();
         if lctx.is_null() {
             return Err(anyhow!(
                 "skippy session did not expose a llama_context handle"
@@ -760,10 +767,10 @@ impl StageModel {
 
         let mut guard_error = ptr::null_mut();
         let guard_status = unsafe {
-            skippy_ffi::skippy_session_begin_external_decode(session.raw, &mut guard_error)
+            skippy_ffi::skippy_session_begin_external_decode(native.raw(), &mut guard_error)
         };
         ensure_ok(guard_status, guard_error)?;
-        let _external_decode_guard = ExternalDecodeGuard(session.raw);
+        let _external_decode_guard = ExternalDecodeGuard(native.raw());
 
         let chunk_count = unsafe { skippy_ffi::mtmd_input_chunks_size(chunks.raw) };
         let use_mrope = unsafe { skippy_ffi::mtmd_decode_use_mrope(projector.raw) };
@@ -881,7 +888,7 @@ impl StageModel {
 
         let mut error = ptr::null_mut();
         let status =
-            unsafe { skippy_ffi::skippy_session_set_position(session.raw, n_past, &mut error) };
+            unsafe { skippy_ffi::skippy_session_set_position(native.raw(), n_past, &mut error) };
         ensure_ok(status, error)?;
         session.token_count = u64::try_from(n_past).context("multimodal position is negative")?;
 

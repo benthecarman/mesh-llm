@@ -1046,6 +1046,9 @@ impl StageSession {
         anchor_position: u64,
         max_tokens: usize,
     ) -> Result<Option<DFlashProposal>> {
+        // The draft context was created against the target context and can
+        // read it while it decodes.
+        let _target = self.native.lock();
         let Some(link) = self.dflash.as_mut() else {
             return Ok(None);
         };
@@ -1313,7 +1316,7 @@ impl StageSession {
     /// for tests of split DFlash bookkeeping above the runtime.
     pub fn detached_dflash_for_test() -> Self {
         Self {
-            raw: ptr::null_mut(),
+            native: crate::model_context::NativeSession::detached(),
             token_count: 0,
             terminal_stage: true,
             batched_activation_exports: true,
@@ -1362,8 +1365,10 @@ impl StageModel {
         // Every lane shares one target context; a scratch session exposes it
         // and refreshes any installed stage program for layer capture.
         let probe = self.create_session()?;
+        // The draft borrows the context every session shares.
+        let target = probe.native.lock();
         let target_ctx: *mut Opaque =
-            unsafe { skippy_ffi::skippy_session_llama_context(probe.raw) }.cast();
+            unsafe { skippy_ffi::skippy_session_llama_context(target.raw()) }.cast();
         if target_ctx.is_null() {
             bail!("target session has no llama context");
         }
@@ -1385,12 +1390,14 @@ impl StageModel {
 /// Reinstalls a stage program after layer capture changed the target's
 /// computation; a no-op for targets without an installed program.
 fn refresh_target_program(session: &StageSession) -> Result<()> {
+    let native = session.native.lock();
     let mut error = ptr::null_mut();
     let status =
-        unsafe { skippy_ffi::skippy_session_begin_external_decode(session.raw, &mut error) };
+        unsafe { skippy_ffi::skippy_session_begin_external_decode(native.raw(), &mut error) };
     ensure_ok(status, error)?;
     let mut error = ptr::null_mut();
-    let status = unsafe { skippy_ffi::skippy_session_end_external_decode(session.raw, &mut error) };
+    let status =
+        unsafe { skippy_ffi::skippy_session_end_external_decode(native.raw(), &mut error) };
     ensure_ok(status, error)
 }
 
@@ -1415,7 +1422,7 @@ mod tests {
 
     fn drafting_session() -> StageSession {
         StageSession {
-            raw: ptr::null_mut(),
+            native: crate::model_context::NativeSession::detached(),
             token_count: 0,
             terminal_stage: true,
             batched_activation_exports: true,

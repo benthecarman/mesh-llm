@@ -189,6 +189,7 @@ impl StageSession {
                 Vec::new(),
             ));
         }
+        let held = HeldContexts::lock(requests.iter().map(|request| &request.session.native));
         let raw_sampling = requests
             .iter()
             .map(|request| request.sampling.map(SamplingConfig::as_raw).transpose())
@@ -211,7 +212,7 @@ impl StageSession {
             })
             .collect::<Vec<_>>();
         let raw_requests =
-            raw_iteration_requests(requests, &raw_sampling, &input_frames, &readouts);
+            raw_iteration_requests(requests, &held, &raw_sampling, &input_frames, &readouts)?;
         let mut output_descs = vec![empty_raw_activation_desc(); requests.len()];
         let mut output_payloads = output_capacities
             .iter()
@@ -347,18 +348,19 @@ impl StageSession {
 /// Borrow request buffers into the C ABI layout for one native iteration.
 fn raw_iteration_requests(
     requests: &[IterationBatchRequest<'_>],
+    held: &HeldContexts,
     sampling: &[Option<RawSamplingConfig>],
     inputs: &[RawInputFrame],
     readouts: &[skippy_ffi::TokenScoreRequest],
-) -> Vec<RawIterationRequest> {
+) -> Result<Vec<RawIterationRequest>> {
     requests
         .iter()
         .zip(sampling)
         .zip(inputs)
         .enumerate()
-        .map(
-            |(index, ((request, sampling), input))| RawIterationRequest {
-                session: request.session.raw,
+        .map(|(index, ((request, sampling), input))| {
+            Ok(RawIterationRequest {
+                session: request.session.native.raw_in(held)?,
                 token_ids: request.token_ids.as_ptr(),
                 token_count: request.token_ids.len(),
                 positions: if request.positions.is_empty() {
@@ -377,8 +379,8 @@ fn raw_iteration_requests(
                     .get(index)
                     .filter(|readout| readout.token_count > 0)
                     .map_or(ptr::null(), |readout| readout as *const _),
-            },
-        )
+            })
+        })
         .collect()
 }
 

@@ -10,6 +10,7 @@ use crate::dflash::{DFlashSplitSession, SharedDFlashCapture, SharedDFlashDraft};
 use crate::error::{ensure_ok, free_error};
 use crate::logging::{clear_last_native_error, with_last_native_error, write_native_log_note};
 use crate::media::MediaProjector;
+use crate::model_context::{ModelContextLock, NativeSession};
 use crate::path_cstring::path_to_cstring;
 use crate::runtime_events;
 use crate::session::StageSession;
@@ -107,6 +108,8 @@ struct StageModelInner {
     dflash: Option<SharedDFlashDraft>,
     /// Target-layer capture for a split DFlash draft on a later stage.
     dflash_capture: Option<SharedDFlashCapture>,
+    /// Serializes work on the one llama context all sessions share.
+    context: ModelContextLock,
 }
 
 /// A read-only model handle for vocabulary operations that do not touch a
@@ -121,8 +124,8 @@ pub struct StageModelReader {
 unsafe impl Send for StageModelInner {}
 unsafe impl Sync for StageModelInner {}
 
-// The experimental C ABI owns synchronization internally for model/session use.
-// Rust stage-server access is additionally serialized behind a Mutex.
+// Methods that touch the shared llama context take the model's context lock,
+// which also serializes them against sessions running on other threads.
 unsafe impl Send for StageModel {}
 
 fn classify_model_state(recurrent: bool, hybrid: bool, diffusion: bool) -> ModelStateKind {
@@ -172,6 +175,7 @@ impl StageModel {
                 capability: None,
                 dflash: None,
                 dflash_capture: None,
+                context: ModelContextLock::default(),
             }),
             media: None,
         }
@@ -238,6 +242,7 @@ impl StageModel {
                 capability,
                 dflash: None,
                 dflash_capture: None,
+                context: ModelContextLock::default(),
             }),
             media,
         })
@@ -498,6 +503,8 @@ impl StageModel {
         path: impl AsRef<Path>,
         config: &RuntimeConfig,
     ) -> Result<()> {
+        // The draft's context is created beside the one sessions share.
+        let _context = self.inner.context.lock();
         let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
             anyhow!("cannot attach MTP draft model while model readers are active")
         })?;
@@ -524,6 +531,8 @@ impl StageModel {
     }
 
     pub fn create_session(&self) -> Result<StageSession> {
+        // Claiming a lane clears its cells in the shared context.
+        let _context = self.inner.context.lock();
         write_native_log_note("skippy_session_create begin");
         let mut raw = ptr::null_mut();
         let mut error = ptr::null_mut();
@@ -535,7 +544,7 @@ impl StageModel {
             return Err(anyhow!("skippy_session_create returned a null handle"));
         }
         let mut session = StageSession {
-            raw,
+            native: NativeSession::new(raw, self.inner.context.clone()),
             token_count: 0,
             terminal_stage: self.inner.terminal_stage,
             batched_activation_exports: self.supports_batched_activation_exports(),
@@ -551,6 +560,7 @@ impl StageModel {
         cache_seq_id: i32,
         token_ids: &[i32],
     ) -> Result<StageSession> {
+        let _context = self.inner.context.lock();
         let mut raw = ptr::null_mut();
         let mut error = ptr::null_mut();
         let status = unsafe {
@@ -570,7 +580,7 @@ impl StageModel {
             ));
         }
         let mut session = StageSession {
-            raw,
+            native: NativeSession::new(raw, self.inner.context.clone()),
             token_count: u64::try_from(token_ids.len()).context("token count exceeds u64")?,
             terminal_stage: self.inner.terminal_stage,
             batched_activation_exports: self.supports_batched_activation_exports(),
@@ -661,6 +671,8 @@ impl StageModel {
         let mut probabilities = vec![0.0_f32; labels.len()];
         let mut output_count = 0usize;
         let mut error = ptr::null_mut();
+        // The read decodes on the shared context.
+        let _context = self.inner.context.lock();
         let status = unsafe {
             skippy_ffi::skippy_system_one_read(
                 self.inner.raw,
@@ -1237,6 +1249,9 @@ fn apply_chat_template_json(
 
 impl Drop for StageModelInner {
     fn drop(&mut self) {
+        // Releasing the draft and capture and freeing the model all touch the
+        // context that sessions share; wait for any in-flight session work.
+        let _context = self.context.lock();
         // The draft context borrows tensors from this model's context.
         self.dflash.take();
         self.dflash_capture.take();

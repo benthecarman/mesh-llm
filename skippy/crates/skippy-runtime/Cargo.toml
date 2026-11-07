@@ -27,6 +27,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 libc = "0.2"
+parking_lot = { version = "0.12", features = ["arc_lock"] }
 tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]

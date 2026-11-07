@@ -670,8 +670,10 @@ impl StageModel {
         let api = skippy_ffi::llama_draft::llama_draft_api()
             .ok_or_else(|| anyhow!("native runtime does not export the draft-context API"))?;
         let probe = self.create_session()?;
+        // Capture toggles state in the context every session shares.
+        let target = probe.native.lock();
         let target_ctx: *mut Opaque =
-            unsafe { skippy_ffi::skippy_session_llama_context(probe.raw) }.cast();
+            unsafe { skippy_ffi::skippy_session_llama_context(target.raw()) }.cast();
         if target_ctx.is_null() {
             bail!("target session has no llama context");
         }
@@ -833,7 +835,7 @@ mod tests {
 
     fn session_with_captured(rows: DFlashFeatureRows) -> StageSession {
         StageSession {
-            raw: std::ptr::null_mut(),
+            native: crate::model_context::NativeSession::detached(),
             token_count: 0,
             terminal_stage: false,
             batched_activation_exports: true,
@@ -1005,7 +1007,7 @@ mod tests {
         let mut link = super::super::DFlashSessionLink::detached(0);
         link.input_layer = input_layer;
         StageSession {
-            raw: std::ptr::null_mut(),
+            native: crate::model_context::NativeSession::detached(),
             token_count: 0,
             terminal_stage: true,
             batched_activation_exports: true,

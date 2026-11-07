@@ -154,11 +154,12 @@ fn size_query_result(status: Status, error: *mut skippy_ffi::Error, bytes: usize
 impl StageSession {
     /// Bytes [`Self::export_full_state`] would allocate, without copying state.
     pub fn full_state_size(&mut self, layer_start: i32, layer_end: i32) -> Result<u64> {
+        let native = self.native.lock();
         let mut bytes = 0usize;
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_full_state(
-                self.raw,
+                native.raw(),
                 layer_start,
                 layer_end,
                 ptr::null_mut(),
@@ -172,11 +173,12 @@ impl StageSession {
 
     /// Bytes [`Self::export_recurrent_state`] would allocate, without copying state.
     pub fn recurrent_state_size(&mut self) -> Result<u64> {
+        let native = self.native.lock();
         let mut bytes = 0usize;
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_recurrent_state(
-                self.raw,
+                native.raw(),
                 ptr::null_mut(),
                 0,
                 &mut bytes,
@@ -194,12 +196,13 @@ impl StageSession {
         token_start: u64,
         token_count: u64,
     ) -> Result<u64> {
+        let native = self.native.lock();
         let mut desc = RawKvPageDesc::default();
         let mut bytes = 0usize;
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_kv_page(
-                self.raw,
+                native.raw(),
                 layer_start,
                 layer_end,
                 token_start,
@@ -215,11 +218,12 @@ impl StageSession {
     }
 
     pub fn export_state(&mut self, layer_start: i32, layer_end: i32) -> Result<Vec<u8>> {
+        let native = self.native.lock();
         let mut bytes = 0usize;
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_state(
-                self.raw,
+                native.raw(),
                 layer_start,
                 layer_end,
                 ptr::null_mut(),
@@ -239,7 +243,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_state(
-                self.raw,
+                native.raw(),
                 layer_start,
                 layer_end,
                 payload.as_mut_ptr().cast(),
@@ -254,10 +258,11 @@ impl StageSession {
     }
 
     pub fn import_state(&mut self, layer_start: i32, layer_end: i32, input: &[u8]) -> Result<()> {
+        let native = self.native.lock();
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_import_state(
-                self.raw,
+                native.raw(),
                 layer_start,
                 layer_end,
                 input.as_ptr().cast(),
@@ -283,11 +288,12 @@ impl StageSession {
     }
 
     pub fn export_full_state(&mut self, layer_start: i32, layer_end: i32) -> Result<Vec<u8>> {
+        let native = self.native.lock();
         let mut bytes = 0usize;
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_full_state(
-                self.raw,
+                native.raw(),
                 layer_start,
                 layer_end,
                 ptr::null_mut(),
@@ -307,7 +313,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_full_state(
-                self.raw,
+                native.raw(),
                 layer_start,
                 layer_end,
                 payload.as_mut_ptr().cast(),
@@ -327,10 +333,11 @@ impl StageSession {
         layer_end: i32,
         input: &[u8],
     ) -> Result<()> {
+        let native = self.native.lock();
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_import_full_state(
-                self.raw,
+                native.raw(),
                 layer_start,
                 layer_end,
                 input.as_ptr().cast(),
@@ -365,12 +372,13 @@ impl StageSession {
         token_start: u64,
         token_count: u64,
     ) -> Result<RuntimeKvPage> {
+        let native = self.native.lock();
         let mut desc = RawKvPageDesc::default();
         let mut bytes = 0usize;
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_kv_page(
-                self.raw,
+                native.raw(),
                 layer_start,
                 layer_end,
                 token_start,
@@ -393,7 +401,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_kv_page(
-                self.raw,
+                native.raw(),
                 layer_start,
                 layer_end,
                 token_start,
@@ -421,12 +429,13 @@ impl StageSession {
         token_count: u64,
         output: &mut [u8],
     ) -> Result<RuntimeKvPageDesc> {
+        let native = self.native.lock();
         let mut desc = RawKvPageDesc::default();
         let mut written = 0usize;
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_kv_page(
-                self.raw,
+                native.raw(),
                 layer_start,
                 layer_end,
                 token_start,
@@ -449,6 +458,7 @@ impl StageSession {
     }
 
     pub fn import_kv_page(&mut self, desc: &RuntimeKvPageDesc, payload: &[u8]) -> Result<()> {
+        let native = self.native.lock();
         desc.validate_payload(payload.len())?;
         if desc.codec == skippy_ffi::KV_PAGE_CODEC_ISWA_COMPOSITE_V1 && self.token_count != 0 {
             anyhow::bail!("composite ISWA KV page import requires a fresh session");
@@ -457,7 +467,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_import_kv_page(
-                self.raw,
+                native.raw(),
                 &raw,
                 payload.as_ptr().cast(),
                 payload.len(),
@@ -478,6 +488,7 @@ impl StageSession {
         desc: &RuntimeKvPageDesc,
         archive: &[u8],
     ) -> Result<()> {
+        let native = self.native.lock();
         let raw_len = usize::try_from(desc.payload_bytes)?;
         desc.validate_payload(raw_len)?;
         if desc.codec == skippy_ffi::KV_PAGE_CODEC_ISWA_COMPOSITE_V1 && self.token_count != 0 {
@@ -489,7 +500,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_import_cachegen_kv_page_v1(
-                self.raw,
+                native.raw(),
                 &raw,
                 records.as_ptr(),
                 records.len(),
@@ -506,11 +517,12 @@ impl StageSession {
     }
 
     pub fn export_recurrent_state(&mut self) -> Result<Vec<u8>> {
+        let native = self.native.lock();
         let mut bytes = 0usize;
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_recurrent_state(
-                self.raw,
+                native.raw(),
                 ptr::null_mut(),
                 0,
                 &mut bytes,
@@ -528,7 +540,7 @@ impl StageSession {
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_export_recurrent_state(
-                self.raw,
+                native.raw(),
                 payload.as_mut_ptr().cast(),
                 payload.len(),
                 &mut written,
@@ -541,10 +553,11 @@ impl StageSession {
     }
 
     pub fn import_recurrent_state(&mut self, input: &[u8]) -> Result<()> {
+        let native = self.native.lock();
         let mut error = ptr::null_mut();
         let status = unsafe {
             skippy_ffi::skippy_import_recurrent_state(
-                self.raw,
+                native.raw(),
                 input.as_ptr().cast(),
                 input.len(),
                 &mut error,

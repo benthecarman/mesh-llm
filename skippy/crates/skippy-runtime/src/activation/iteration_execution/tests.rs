@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn serial_decode_accepts_explicit_phase_and_matching_position() {
     let mut session = StageSession {
-        raw: ptr::null_mut(),
+        native: crate::model_context::NativeSession::detached(),
         token_count: 4,
         terminal_stage: true,
         batched_activation_exports: true,
@@ -30,7 +30,7 @@ fn serial_decode_accepts_explicit_phase_and_matching_position() {
 fn serial_decode_accepts_framed_origin_for_recurrent_downstream_stage() {
     for positions in [&[][..], &[0][..]] {
         let mut session = StageSession {
-            raw: ptr::null_mut(),
+            native: crate::model_context::NativeSession::detached(),
             token_count: 0,
             terminal_stage: true,
             batched_activation_exports: true,
@@ -65,7 +65,7 @@ fn serial_decode_rejects_invalid_decode_shapes() {
         (4, &[7][..], &[][..], false),
     ] {
         let mut session = StageSession {
-            raw: ptr::null_mut(),
+            native: crate::model_context::NativeSession::detached(),
             token_count: session_tokens,
             terminal_stage: true,
             batched_activation_exports: true,
@@ -90,7 +90,7 @@ fn serial_decode_rejects_invalid_decode_shapes() {
 #[test]
 fn one_token_prefill_tail_is_explicitly_not_decode() {
     let mut session = StageSession {
-        raw: ptr::null_mut(),
+        native: crate::model_context::NativeSession::detached(),
         token_count: 4,
         terminal_stage: true,
         batched_activation_exports: true,
@@ -113,7 +113,7 @@ fn one_token_prefill_tail_is_explicitly_not_decode() {
 #[test]
 fn serial_iteration_omits_samples_for_intermediate_stages() {
     let mut session = StageSession {
-        raw: ptr::null_mut(),
+        native: crate::model_context::NativeSession::detached(),
         token_count: 4,
         terminal_stage: false,
         batched_activation_exports: true,
@@ -156,7 +156,7 @@ fn iteration_samples_reject_duplicate_or_out_of_range_indexes() {
 /// Open a small native session for iteration-batch regression fixtures.
 fn batch_session(terminal_stage: bool, batched_activation_exports: bool) -> StageSession {
     StageSession {
-        raw: ptr::null_mut(),
+        native: crate::model_context::NativeSession::detached(),
         token_count: 0,
         terminal_stage,
         batched_activation_exports,
