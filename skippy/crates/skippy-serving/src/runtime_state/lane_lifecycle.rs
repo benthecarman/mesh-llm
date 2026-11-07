@@ -1,3 +1,5 @@
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+
 use super::*;
 
 impl RuntimeState {
@@ -147,7 +149,7 @@ impl RuntimeState {
         let mut lane_discarded = false;
         let mut lane_discard_reason: Option<String> = None;
 
-        if let Some(mut lane_session) = self.sessions.remove(session_id) {
+        if let Some(lane_session) = self.sessions.remove(session_id) {
             let lane_index = lane_session.index;
             // Always release the lane's native KV cells back to the
             // unified pool. The trim+preserve path kept the lane's cells
@@ -170,7 +172,8 @@ impl RuntimeState {
             let idle_pool_full = self
                 .max_idle_sessions
                 .is_some_and(|max| self.idle_sessions.len() >= max);
-            match lane_session.session.reset() {
+            let (mut lane_session, reset) = self.reset_releasing_on_panic(lane_session);
+            match reset {
                 Ok(()) if idle_pool_full => {
                     // The idle pool is already at model_fit.cache_idle_slots
                     // capacity: drop this lane (releasing its native KV
@@ -239,6 +242,35 @@ impl RuntimeState {
             lane_discard_reason,
             stats_after: self.session_stats(),
         })
+    }
+
+    /// Resets a lane that is already out of the session map. If the reset
+    /// panics, the unwind would drop the lane where panic recovery cannot
+    /// see it, so its index is returned to the free list before unwinding
+    /// continues; otherwise each such panic would lose one lane for good.
+    fn reset_releasing_on_panic(
+        &mut self,
+        mut lane_session: RuntimeLaneSession,
+    ) -> (RuntimeLaneSession, Result<()>) {
+        match catch_unwind(AssertUnwindSafe(|| self.reset_lane(&mut lane_session))) {
+            Ok(reset) => (lane_session, reset),
+            Err(panic) => {
+                let lane_index = lane_session.index;
+                drop(lane_session);
+                self.free_lane_indices.push(lane_index);
+                resume_unwind(panic)
+            }
+        }
+    }
+
+    /// Resets the lane's native session.
+    fn reset_lane(&self, lane_session: &mut RuntimeLaneSession) -> Result<()> {
+        #[cfg(test)]
+        assert!(
+            !self.panic_on_lane_reset_for_test,
+            "lane reset panicked for a test"
+        );
+        lane_session.session.reset()
     }
 
     pub fn session_stats(&self) -> RuntimeSessionStats {

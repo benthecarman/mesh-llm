@@ -1181,7 +1181,7 @@ impl StageOpenAiBackend {
             }
         });
         let scheduler_session_key = session_key.clone();
-        if let Ok(outcome) = self.iteration_scheduler.execute_runtime_timed(
+        if let Ok(outcome) = self.iteration_scheduler.execute_session_cleanup_timed(
             "openai-embedded-session-stop",
             move |runtime| {
                 runtime

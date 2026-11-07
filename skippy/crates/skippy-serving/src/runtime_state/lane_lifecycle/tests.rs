@@ -269,3 +269,28 @@ fn disabling_idle_sessions_caps_future_retention_at_zero() {
         0
     );
 }
+
+/// A reset that panics unwinds out of `drop_session_timed` after the lane has
+/// left the session map, where panic recovery can no longer find it.
+#[test]
+fn reset_panic_while_dropping_a_session_frees_its_lane_index() {
+    let mut runtime = RuntimeState::new_modelless_for_test(1);
+    runtime.sessions.insert(
+        "a".to_string(),
+        RuntimeLaneSession {
+            index: 0,
+            session: skippy_runtime::StageSession::detached_dflash_for_test(),
+            resident_prefix: None,
+        },
+    );
+    runtime.next_lane_index = 1;
+    runtime.panic_on_lane_reset_for_test = true;
+
+    let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.drop_session_timed("a")
+    }));
+
+    assert!(dropped.is_err(), "precondition: the reset panicked");
+    assert!(runtime.sessions.is_empty());
+    assert_eq!(runtime.free_lane_indices, [0]);
+}

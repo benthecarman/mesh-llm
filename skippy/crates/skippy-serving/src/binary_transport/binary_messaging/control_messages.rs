@@ -86,7 +86,7 @@ pub(super) fn handle_stop(
     let scheduler_session_key = session_key.to_string();
     let scheduler_message = message.clone();
     let outcome = iteration_scheduler
-        .execute_runtime_timed("binary-session-stop", move |runtime| {
+        .execute_session_cleanup_timed("binary-session-stop", move |runtime| {
             let record = accumulated.map(|tokens| {
                 maybe_record_binary_full_prefill(
                     &scheduler_config,
@@ -416,14 +416,17 @@ pub(super) fn handle_prefix_cache_control(
         control_stats.merge(reply.stats);
         if downstream_missed {
             let scheduler_session_key = session_key.to_string();
-            let _ = iteration_scheduler.execute_runtime("binary-prefix-rollback", move |runtime| {
-                runtime
-                    .drop_session_timed(&scheduler_session_key)
-                    .map(|_| ())
-                    .map_err(|error| {
-                        skippy_inference_api::InferenceError::backend(format!("{error:#}"))
-                    })
-            });
+            let _ = iteration_scheduler.execute_session_cleanup(
+                "binary-prefix-rollback",
+                move |runtime| {
+                    runtime
+                        .drop_session_timed(&scheduler_session_key)
+                        .map(|_| ())
+                        .map_err(|error| {
+                            skippy_inference_api::InferenceError::backend(format!("{error:#}"))
+                        })
+                },
+            );
         }
     }
     // The server frontend emits TryRestorePrefill for ordinary prefix restore.

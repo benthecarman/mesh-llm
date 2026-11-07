@@ -4,6 +4,7 @@ mod direct_batch;
 mod direct_execution;
 mod direct_reply;
 pub(crate) mod readout;
+mod session_cleanup;
 
 use self::cache_runtime::{
     CacheAffinityRefresh, CacheRuntimeQueue, CacheRuntimeTelemetry,

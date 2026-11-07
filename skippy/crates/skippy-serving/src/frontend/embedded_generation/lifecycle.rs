@@ -601,7 +601,7 @@ impl StageOpenAiBackend {
         session_key: &str,
     ) {
         let scheduler_session_key = session_key.to_string();
-        let Ok(outcome) = self.iteration_scheduler.execute_runtime_timed(
+        let Ok(outcome) = self.iteration_scheduler.execute_session_cleanup_timed(
             "embedded-session-drop",
             move |runtime| {
                 runtime

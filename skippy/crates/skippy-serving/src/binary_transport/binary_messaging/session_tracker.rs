@@ -238,7 +238,7 @@ pub(super) fn release_tracked_connection_sessions(
     let scheduler_config = config.clone();
     let scheduler_telemetry = telemetry.clone();
     let failures = iteration_scheduler
-        .execute_runtime("binary-orphan-cleanup", move |runtime| {
+        .execute_session_cleanup("binary-orphan-cleanup", move |runtime| {
             let mut failures = Vec::new();
             for (session_key, lease) in orphaned {
                 let Some(drop_result) =

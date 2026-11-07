@@ -18,6 +18,7 @@ use skippy_runtime::{
 };
 
 mod frame_operations;
+mod lane_checkout;
 mod lane_lifecycle;
 pub mod lifecycle;
 pub mod panic_recovery;
@@ -82,6 +83,9 @@ pub struct RuntimeState {
     /// Lets modelless tests exercise a split DFlash final stage.
     #[cfg(test)]
     pub(crate) dflash_drafts_for_test: bool,
+    /// Makes resetting a lane panic, for tests of unwinding through a reset.
+    #[cfg(test)]
+    panic_on_lane_reset_for_test: bool,
 }
 
 /// What a split DFlash final stage needs to draft the block after a verify
@@ -273,6 +277,7 @@ impl RuntimeState {
             compute_meter: Arc::default(),
             modelless_for_test: true,
             dflash_drafts_for_test: false,
+            panic_on_lane_reset_for_test: false,
         }
     }
 
@@ -431,6 +436,8 @@ fn runtime_from_loaded_model(
         modelless_for_test: false,
         #[cfg(test)]
         dflash_drafts_for_test: false,
+        #[cfg(test)]
+        panic_on_lane_reset_for_test: false,
     })))
 }
 

@@ -105,14 +105,14 @@ impl StageOpenAiBackend {
         ids: &crate::frontend::generation::InferenceGenerationIds,
     ) {
         let scheduler_session_id = session_id.to_string();
-        if let Ok(outcome) =
-            self.iteration_scheduler
-                .execute_runtime_timed("local-session-drop", move |runtime| {
-                    runtime
-                        .drop_session_timed(&scheduler_session_id)
-                        .map_err(openai_backend_error)
-                })
-        {
+        if let Ok(outcome) = self.iteration_scheduler.execute_session_cleanup_timed(
+            "local-session-drop",
+            move |runtime| {
+                runtime
+                    .drop_session_timed(&scheduler_session_id)
+                    .map_err(openai_backend_error)
+            },
+        ) {
             let drop_stats = outcome.value;
             let mut attrs = self.openai_attrs(ids);
             attrs.insert(

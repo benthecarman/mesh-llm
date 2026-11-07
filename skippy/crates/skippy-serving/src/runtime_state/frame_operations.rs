@@ -1,3 +1,4 @@
+use super::lane_checkout::CheckedOutLanes;
 use super::*;
 
 fn final_sampled_chunk_start(token_count: usize, batch_size: usize) -> usize {
@@ -126,22 +127,15 @@ impl RuntimeState {
             self.session(request.session_id)?;
         }
 
-        let mut lane_sessions = Vec::with_capacity(requests.len());
-        for request in requests {
-            let lane_session = self.sessions.remove(request.session_id).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "session {} was not active after admission",
-                    request.session_id
-                )
-            })?;
-            lane_sessions.push((request.session_id.to_string(), lane_session));
-        }
-
         let result = {
-            let mut decode_requests = lane_sessions
+            let mut lanes = CheckedOutLanes::take(
+                &mut self.sessions,
+                requests.iter().map(|request| request.session_id),
+            )?;
+            let mut decode_requests = lanes
                 .iter_mut()
                 .zip(requests.iter())
-                .map(|((_, lane_session), request)| DecodeBatchRequest {
+                .map(|(lane_session, request)| DecodeBatchRequest {
                     session: &mut lane_session.session,
                     token_id: request.token_id,
                     sampling: request.sampling,
@@ -150,9 +144,6 @@ impl RuntimeState {
             StageSession::decode_batch_sampled(&mut decode_requests)
         };
 
-        for (session_id, lane_session) in lane_sessions {
-            self.sessions.insert(session_id, lane_session);
-        }
         if result.is_ok() {
             for request in requests {
                 self.add_session_tokens(request.session_id, 1);
@@ -316,22 +307,15 @@ impl RuntimeState {
             self.session(request.session_id)?;
         }
 
-        let mut lane_sessions = Vec::with_capacity(requests.len());
-        for request in requests {
-            let lane_session = self.sessions.remove(request.session_id).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "session {} was not active after admission",
-                    request.session_id
-                )
-            })?;
-            lane_sessions.push((request.session_id.to_string(), lane_session));
-        }
-
         let result = {
-            let mut decode_requests = lane_sessions
+            let mut lanes = CheckedOutLanes::take(
+                &mut self.sessions,
+                requests.iter().map(|request| request.session_id),
+            )?;
+            let mut decode_requests = lanes
                 .iter_mut()
                 .zip(requests.iter())
-                .map(|((_, lane_session), request)| DecodeFrameBatchRequest {
+                .map(|(lane_session, request)| DecodeFrameBatchRequest {
                     session: &mut lane_session.session,
                     token_id: request.token_id,
                     sampling: request.sampling,
@@ -341,9 +325,6 @@ impl RuntimeState {
             StageSession::decode_step_frame_batch_sampled(&mut decode_requests)
         };
 
-        for (session_id, lane_session) in lane_sessions {
-            self.sessions.insert(session_id, lane_session);
-        }
         match &result {
             Ok(_) => {
                 for request in requests {
@@ -421,22 +402,15 @@ impl RuntimeState {
             self.session(request.session_id)?;
         }
 
-        let mut lane_sessions = Vec::with_capacity(requests.len());
-        for request in requests {
-            let lane_session = self.sessions.remove(request.session_id).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "session {} was not active after admission",
-                    request.session_id
-                )
-            })?;
-            lane_sessions.push((request.session_id.to_string(), lane_session));
-        }
-
         let result = {
-            let mut iteration_requests = lane_sessions
+            let mut lanes = CheckedOutLanes::take(
+                &mut self.sessions,
+                requests.iter().map(|request| request.session_id),
+            )?;
+            let mut iteration_requests = lanes
                 .iter_mut()
                 .zip(requests.iter())
-                .map(|((_, lane_session), request)| IterationBatchRequest {
+                .map(|(lane_session, request)| IterationBatchRequest {
                     session: &mut lane_session.session,
                     token_ids: request.token_ids,
                     positions: request.positions,
@@ -455,9 +429,6 @@ impl RuntimeState {
             }
         };
 
-        for (session_id, lane_session) in lane_sessions {
-            self.sessions.insert(session_id, lane_session);
-        }
         match &result {
             Ok(_) => {
                 for request in requests {

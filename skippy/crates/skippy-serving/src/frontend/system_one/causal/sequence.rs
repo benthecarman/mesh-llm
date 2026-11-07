@@ -224,14 +224,15 @@ impl<'a> DecisionSequence<'a> {
     /// Remove the local sequence session through the runtime scheduler.
     fn drop_local(&self) -> InferenceResult<()> {
         let session = self.session.clone();
-        self.backend
-            .iteration_scheduler
-            .execute_runtime("decision-session-drop", move |runtime| {
+        self.backend.iteration_scheduler.execute_session_cleanup(
+            "decision-session-drop",
+            move |runtime| {
                 runtime
                     .drop_session_timed(&session)
                     .map(|_| ())
                     .map_err(openai_backend_error)
-            })
+            },
+        )
     }
 }
 

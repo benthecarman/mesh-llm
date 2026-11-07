@@ -1168,7 +1168,7 @@ impl StageOpenAiBackend {
         downstream: &mut TcpStream,
     ) {
         let scheduler_session_key = session_key.to_string();
-        let _ = self.iteration_scheduler.execute_runtime(
+        let _ = self.iteration_scheduler.execute_session_cleanup(
             "embedded-split-restore-drop",
             move |runtime| {
                 runtime

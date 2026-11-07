@@ -48,7 +48,7 @@ impl DecisionSequence<'_> {
         }
         if restored > 0 && !self.restore_downstream(&tokens[..restored])? {
             let session = self.session.clone();
-            self.backend.iteration_scheduler.execute_runtime(
+            self.backend.iteration_scheduler.execute_session_cleanup(
                 "decision-prefix-miss",
                 move |runtime| {
                     runtime
