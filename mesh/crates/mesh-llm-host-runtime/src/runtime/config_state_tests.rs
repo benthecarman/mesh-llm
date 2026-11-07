@@ -15,6 +15,8 @@ mod support;
 use support::*;
 #[path = "config_state_tests/diagnostics.rs"]
 mod diagnostics;
+#[path = "config_state_tests/disk_edits.rs"]
+mod disk_edits;
 #[path = "config_state_tests/kv_disk.rs"]
 mod kv_disk;
 #[path = "config_state_tests/logging.rs"]

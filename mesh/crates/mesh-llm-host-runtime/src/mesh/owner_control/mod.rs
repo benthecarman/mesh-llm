@@ -131,6 +131,20 @@ where
     })?
 }
 
+/// Tells config watchers about `revision` unless they already have it. A
+/// revision conflict can still advance the revision: one caused by an edit
+/// made to the config file on disk takes that edit in as a new revision.
+pub(super) fn publish_config_revision_if_changed(
+    revision_tx: &tokio::sync::watch::Sender<u64>,
+    revision: u64,
+) {
+    revision_tx.send_if_modified(|current| {
+        let changed = *current != revision;
+        *current = revision;
+        changed
+    });
+}
+
 fn apply_owner_control_config_with_persistence<F>(
     config_state: Arc<tokio::sync::Mutex<crate::runtime::config_state::ConfigState>>,
     mesh_config: crate::plugin::MeshConfig,
@@ -916,12 +930,15 @@ impl Node {
                     },
                 )
             }
-            ApplyResult::RevisionConflict { current_revision } => owner_control_error_envelope(
-                crate::proto::node::OwnerControlErrorCode::RevisionConflict,
-                Some(request_id),
-                Some(current_revision),
-                "revision conflict: expected_revision does not match current",
-            ),
+            ApplyResult::RevisionConflict { current_revision } => {
+                publish_config_revision_if_changed(&self.config_revision_tx, current_revision);
+                owner_control_error_envelope(
+                    crate::proto::node::OwnerControlErrorCode::RevisionConflict,
+                    Some(request_id),
+                    Some(current_revision),
+                    "revision conflict: expected_revision does not match current",
+                )
+            }
             ApplyResult::PersistedWithRevisionTrackingError {
                 revision,
                 hash,

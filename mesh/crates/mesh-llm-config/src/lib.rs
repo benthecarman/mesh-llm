@@ -65,8 +65,8 @@ pub use private_file::{
 };
 pub use size::{IecSizeParseError, parse_iec_size};
 pub use store::{
-    ConfigStore, config_path, config_to_toml, load_config, parse_config_toml,
-    parse_config_toml_structural,
+    ConditionalSave, ConfigFileFingerprint, ConfigStore, config_path, config_to_toml, load_config,
+    parse_config_toml, parse_config_toml_structural,
 };
 pub use validate::{
     ConfigDiagnostic, ConfigDiagnosticCode, ConfigDiagnosticSchemaSource, ConfigDiagnosticSeverity,

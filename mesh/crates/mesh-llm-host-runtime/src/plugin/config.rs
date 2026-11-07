@@ -35,16 +35,32 @@ pub struct ConfigFileValidation {
 
 pub fn load_config(override_path: Option<&Path>) -> Result<MeshConfig> {
     let path = config_path(override_path)?;
-    let mut config = if path.exists() {
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read config {}", path.display()))?;
-        parse_config_toml(&raw).with_context(|| format!("Invalid config {}", path.display()))?
+    let contents = if path.exists() {
+        Some(
+            std::fs::read(&path)
+                .with_context(|| format!("Failed to read config {}", path.display()))?,
+        )
     } else {
-        MeshConfig::default()
+        None
+    };
+    load_config_contents(&path, contents.as_deref())
+}
+
+/// Builds the config that [`load_config`] would for `path` from contents the
+/// caller already read from it, or `None` for no file, so a caller that also
+/// fingerprints those contents gets both from one read.
+pub(crate) fn load_config_contents(path: &Path, contents: Option<&[u8]>) -> Result<MeshConfig> {
+    let mut config = match contents {
+        Some(contents) => {
+            let raw = std::str::from_utf8(contents)
+                .with_context(|| format!("Failed to read config {}", path.display()))?;
+            parse_config_toml(raw).with_context(|| format!("Invalid config {}", path.display()))?
+        }
+        None => MeshConfig::default(),
     };
     apply_env_overrides(&mut config)?;
     config.source_directory = Some(
-        std::path::absolute(&path)?
+        std::path::absolute(path)?
             .parent()
             .unwrap_or(Path::new("."))
             .to_path_buf(),

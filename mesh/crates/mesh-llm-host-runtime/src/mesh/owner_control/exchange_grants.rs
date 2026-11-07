@@ -23,11 +23,15 @@ pub(super) fn apply_with_exchange_grants(
         expected_revision,
         persist,
     );
+    // A revision conflict may have taken in an edit made to the config file
+    // on disk, which can add or revoke grants. Publishing grants that did not
+    // change leaves them as they are.
     if matches!(
         &result.0,
         ApplyResult::Applied { .. }
             | ApplyResult::AppliedWithRestartRequired { .. }
             | ApplyResult::PersistedWithRevisionTrackingError { .. }
+            | ApplyResult::RevisionConflict { .. }
     ) {
         with_serialized_config(config_state, |config| {
             if let Some(manager) = manager_provider() {
@@ -226,7 +230,7 @@ mod tests {
                     0,
                     |pending| {
                         let persistence = pending.persist();
-                        assert!(matches!(persistence, ConfigPersistence::Persisted));
+                        assert!(matches!(persistence, ConfigPersistence::Persisted(_)));
                         persisted_tx.send(()).unwrap();
                         release_rx.recv().unwrap();
                         persistence
@@ -254,6 +258,55 @@ mod tests {
         );
         let persisted = ConfigState::load(&directory.join("config.toml")).unwrap();
         assert!(persisted.config().plugins.is_empty());
+        manager.shutdown().await;
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[tokio::test]
+    async fn a_grant_revoked_by_editing_the_config_file_is_revoked_on_conflict() {
+        let (directory, state, manager) = granted_fixture().await;
+        assert!(manager.effective_exchange_grant("observer").is_some());
+        // The operator removes the grant by hand while the host runs.
+        crate::plugin::ConfigStore::open(directory.join("config.toml"))
+            .save(&MeshConfig::default())
+            .unwrap();
+        let mut stale = state.lock().await.config().clone();
+        stale.models.push(crate::plugin::ModelConfigEntry {
+            model: "stale-apply.gguf".to_string(),
+            ..Default::default()
+        });
+        let apply_state = Arc::clone(&state);
+        let apply_manager = manager.clone();
+        let runtime = tokio::runtime::Handle::current();
+
+        let (result, revision, _) = tokio::task::spawn_blocking(move || {
+            apply_with_exchange_grants(
+                apply_state,
+                stale,
+                0,
+                |pending| pending.persist(),
+                || Some(apply_manager),
+                runtime,
+            )
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(
+                result,
+                ApplyResult::RevisionConflict {
+                    current_revision: 1
+                }
+            ),
+            "got {result:?}"
+        );
+        assert_eq!(revision, 1);
+        assert!(state.lock().await.config().plugins.is_empty());
+        assert!(
+            manager.effective_exchange_grant("observer").is_none(),
+            "the grant the operator removed must not stay in effect"
+        );
         manager.shutdown().await;
         std::fs::remove_dir_all(directory).ok();
     }

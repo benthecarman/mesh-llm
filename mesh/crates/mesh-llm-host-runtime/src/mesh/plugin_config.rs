@@ -3,6 +3,41 @@ use crate::runtime::config_state::{ApplyResult, ConfigApplyMode};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// The config entry for `plugin_name`, added with nothing set if the config
+/// has none yet.
+fn plugin_entry_mut<'a>(
+    config: &'a mut crate::plugin::MeshConfig,
+    plugin_name: &str,
+) -> &'a mut crate::plugin::PluginConfigEntry {
+    let index = match config
+        .plugins
+        .iter()
+        .position(|plugin| plugin.name == plugin_name)
+    {
+        Some(index) => index,
+        None => {
+            config.plugins.push(crate::plugin::PluginConfigEntry {
+                operation_bindings: Vec::new(),
+                name: plugin_name.to_string(),
+                enabled: None,
+                web_ui_enabled: None,
+                web_ui_primary_tab: None,
+                allow_peer_blocks: None,
+                allow_inference_observation: None,
+                openai_exchange_grant: None,
+                command: None,
+                args: Vec::new(),
+                url: None,
+                models: None,
+                settings: BTreeMap::new(),
+                startup: crate::plugin::PluginStartupConfig::default(),
+            });
+            config.plugins.len() - 1
+        }
+    };
+    &mut config.plugins[index]
+}
+
 impl Node {
     pub(crate) async fn set_plugin_web_ui_enabled(
         &self,
@@ -21,32 +56,9 @@ impl Node {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut state = config_state.blocking_lock();
-            let expected_revision = state.revision();
-            let mut config = state.config().clone();
-            match config
-                .plugins
-                .iter_mut()
-                .find(|plugin| plugin.name == plugin_name)
-            {
-                Some(plugin) => plugin.web_ui_enabled = Some(enabled),
-                None => config.plugins.push(crate::plugin::PluginConfigEntry {
-                    operation_bindings: Vec::new(),
-                    name: plugin_name,
-                    enabled: None,
-                    web_ui_enabled: Some(enabled),
-                    web_ui_primary_tab: None,
-                    allow_peer_blocks: None,
-                    allow_inference_observation: None,
-                    openai_exchange_grant: None,
-                    command: None,
-                    args: Vec::new(),
-                    url: None,
-                    models: None,
-                    settings: BTreeMap::new(),
-                    startup: crate::plugin::PluginStartupConfig::default(),
-                }),
-            }
-            let result = state.apply(config, expected_revision);
+            let (result, ()) = state.apply_edit(|config| {
+                plugin_entry_mut(config, &plugin_name).web_ui_enabled = Some(enabled);
+            });
             Ok((result, state.revision()))
         })
         .await
@@ -73,6 +85,10 @@ impl Node {
                 anyhow::bail!(error)
             }
             (ApplyResult::RevisionConflict { current_revision }, _) => {
+                super::owner_control::publish_config_revision_if_changed(
+                    &revision_tx,
+                    current_revision,
+                );
                 anyhow::bail!("config revision conflict at revision {current_revision}")
             }
             (ApplyResult::ValidationError { error, .. }, _)
@@ -97,32 +113,10 @@ impl Node {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut state = config_state.blocking_lock();
-            let expected_revision = state.revision();
-            let mut config = state.config().clone();
-            match config
-                .plugins
-                .iter_mut()
-                .find(|plugin| plugin.name == plugin_name)
-            {
-                Some(plugin) => plugin.web_ui_primary_tab = Some(primary_tab_enabled),
-                None => config.plugins.push(crate::plugin::PluginConfigEntry {
-                    operation_bindings: Vec::new(),
-                    name: plugin_name,
-                    enabled: None,
-                    web_ui_enabled: None,
-                    web_ui_primary_tab: Some(primary_tab_enabled),
-                    allow_peer_blocks: None,
-                    allow_inference_observation: None,
-                    openai_exchange_grant: None,
-                    command: None,
-                    args: Vec::new(),
-                    url: None,
-                    models: None,
-                    settings: BTreeMap::new(),
-                    startup: crate::plugin::PluginStartupConfig::default(),
-                }),
-            }
-            let result = state.apply(config, expected_revision);
+            let (result, ()) = state.apply_edit(|config| {
+                plugin_entry_mut(config, &plugin_name).web_ui_primary_tab =
+                    Some(primary_tab_enabled);
+            });
             Ok((result, state.revision()))
         })
         .await
@@ -149,6 +143,10 @@ impl Node {
                 anyhow::bail!(error)
             }
             (ApplyResult::RevisionConflict { current_revision }, _) => {
+                super::owner_control::publish_config_revision_if_changed(
+                    &revision_tx,
+                    current_revision,
+                );
                 anyhow::bail!("config revision conflict at revision {current_revision}")
             }
             (ApplyResult::ValidationError { error, .. }, _)
@@ -185,40 +183,14 @@ impl Node {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut state = config_state.blocking_lock();
-            let expected_revision = state.revision();
-            let mut config = state.config().clone();
-            let plugin = match config
-                .plugins
-                .iter_mut()
-                .find(|plugin| plugin.name == plugin_name)
-            {
-                Some(plugin) => plugin,
-                None => {
-                    config.plugins.push(crate::plugin::PluginConfigEntry {
-                        operation_bindings: Vec::new(),
-                        name: plugin_name.clone(),
-                        enabled: None,
-                        web_ui_enabled: None,
-                        web_ui_primary_tab: None,
-                        allow_peer_blocks: None,
-                        allow_inference_observation: None,
-                        openai_exchange_grant: None,
-                        command: None,
-                        args: Vec::new(),
-                        url: None,
-                        models: None,
-                        settings: BTreeMap::new(),
-                        startup: crate::plugin::PluginStartupConfig::default(),
-                    });
-                    config.plugins.last_mut().expect("new plugin entry")
+            let (result, updated_settings) = state.apply_edit(|config| {
+                let plugin = plugin_entry_mut(config, &plugin_name);
+                for key in &unset {
+                    plugin.settings.remove(key);
                 }
-            };
-            for key in unset {
-                plugin.settings.remove(&key);
-            }
-            plugin.settings.extend(settings);
-            let updated_settings = plugin.settings.clone();
-            let result = state.apply(config, expected_revision);
+                plugin.settings.extend(settings.clone());
+                plugin.settings.clone()
+            });
             Ok((result, state.revision(), updated_settings))
         })
         .await
@@ -246,6 +218,10 @@ impl Node {
                 anyhow::bail!(error)
             }
             (ApplyResult::RevisionConflict { current_revision }, _, _) => {
+                super::owner_control::publish_config_revision_if_changed(
+                    &revision_tx,
+                    current_revision,
+                );
                 anyhow::bail!("config revision conflict at revision {current_revision}")
             }
             (ApplyResult::ValidationError { error, .. }, _, _)

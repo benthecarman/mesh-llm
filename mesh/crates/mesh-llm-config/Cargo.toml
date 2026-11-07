@@ -17,6 +17,7 @@ skippy-native-runtime = { path = "../../../skippy/crates/skippy-native-runtime",
 mesh-llm-types = { path = "../mesh-llm-types", version = "0.78.0"  }
 semver = "1"
 serde = { workspace = true }
+sha2 = { workspace = true }
 skippy-protocol = { path = "../../../skippy/crates/skippy-protocol", version = "0.78.0"  }
 toml = "1.1"
 toml_edit = "0.25"

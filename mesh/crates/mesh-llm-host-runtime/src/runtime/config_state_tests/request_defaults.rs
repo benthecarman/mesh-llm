@@ -116,6 +116,36 @@ fn failed_persist_puts_the_previous_request_defaults_back() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn an_apply_refused_over_a_disk_edit_puts_the_previous_request_defaults_back() {
+    let dir = test_dir();
+    let config_path = dir.join("config.toml");
+    let mut state = ConfigState::load(&config_path).expect("load");
+    let model = registered_model(&state, "config-state-disk-edit-rollback");
+    ConfigStore::open(&config_path)
+        .add_model_ref("cli-edit.gguf")
+        .expect("cli edit");
+
+    let result = state.apply_with_live_logging(config_with_temperature("0.0"), 0);
+
+    assert!(
+        matches!(
+            result,
+            ApplyResult::RevisionConflict {
+                current_revision: 1
+            }
+        ),
+        "got {result:?}"
+    );
+    assert_eq!(
+        model.snapshot().temperature,
+        Some(0.8),
+        "a refused apply must not stay live"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 fn applied_mode(result: ApplyResult) -> ConfigApplyMode {
     match result {
         ApplyResult::Applied { apply_mode, .. } => apply_mode,

@@ -1,7 +1,8 @@
 use anyhow::Result;
 use mesh_llm_config::{
-    ConfigDiagnostic, ConfigDiagnosticSeverity, ConfigPath, KvDiskTierConfig, LoggingConfig,
-    built_in_config_schema_descriptor, legacy_validation_error_text,
+    ConditionalSave, ConfigDiagnostic, ConfigDiagnosticSeverity, ConfigFileFingerprint, ConfigPath,
+    KvDiskTierConfig, LoggingConfig, built_in_config_schema_descriptor,
+    legacy_validation_error_text,
 };
 
 // Disambiguate from the local proto-mirror ConfigApplyMode (Staged/Noop).
@@ -10,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 use crate::plugin::{
-    ConfigStore, MeshConfig, config_to_toml, load_config,
+    ConfigStore, MeshConfig, config_to_toml, load_config_contents,
     validate_config_diagnostics_with_installed_plugin_schemas,
 };
 use crate::protocol::convert::{canonical_config_hash, mesh_config_to_proto};
@@ -73,9 +74,23 @@ pub(crate) enum ConfigApplyPreparation {
 
 #[derive(Debug)]
 pub(crate) enum ConfigPersistence {
-    Persisted,
-    RevisionTrackingError(String),
+    /// The config file now holds the applied config, fingerprinted here.
+    Persisted(ConfigFileFingerprint),
+    /// The config was saved, but the revision sidecar was not.
+    RevisionTrackingError(ConfigFileFingerprint, String),
+    /// Someone else edited the config file after this host last read or
+    /// wrote it, so the apply was not saved over their edit. Holds the file
+    /// as it was compared, or `None` when it had been removed.
+    ChangedOnDisk(Option<Vec<u8>>),
     PersistError(String),
+}
+
+impl ConfigPersistence {
+    /// Whether the config file was left as it was, so live changes made for
+    /// this apply have to be put back.
+    fn left_file_unchanged(&self) -> bool {
+        matches!(self, Self::ChangedOnDisk(_) | Self::PersistError(_))
+    }
 }
 
 #[derive(Debug)]
@@ -85,6 +100,9 @@ pub(crate) struct PendingConfigApply {
     revision: u64,
     hash: [u8; 32],
     write_hash: [u8; 32],
+    /// The config file as this host last read or wrote it; the apply is saved
+    /// only while the file still matches.
+    expected_disk: ConfigFileFingerprint,
     diagnostics: Vec<ConfigDiagnostic>,
     logging_requires_restart: bool,
     dynamic_logging_only: bool,
@@ -108,16 +126,25 @@ pub(crate) struct PendingConfigApply {
 
 impl PendingConfigApply {
     pub(crate) fn persist(&self) -> ConfigPersistence {
-        if let Err(error) = ConfigStore::open(self.config_path.clone()).save(&self.config) {
-            return ConfigPersistence::PersistError(format!("failed to write config: {error}"));
-        }
+        let store = ConfigStore::open(self.config_path.clone());
+        let written = match store.save_if_unchanged(&self.config, &self.expected_disk) {
+            Ok(ConditionalSave::Saved(fingerprint)) => fingerprint,
+            Ok(ConditionalSave::ChangedOnDisk(contents)) => {
+                return ConfigPersistence::ChangedOnDisk(contents);
+            }
+            Err(error) => {
+                return ConfigPersistence::PersistError(format!("failed to write config: {error}"));
+            }
+        };
 
-        let sidecar = revision_sidecar_path(&self.config_path);
-        match atomic_write(&sidecar, self.revision.to_string().as_bytes()) {
-            Ok(()) => ConfigPersistence::Persisted,
-            Err(error) => ConfigPersistence::RevisionTrackingError(format!(
-                "failed to write revision sidecar: {error}; config persisted and in-memory revision advanced, but on-disk revision tracking may be stale"
-            )),
+        match write_revision(&self.config_path, self.revision) {
+            Ok(()) => ConfigPersistence::Persisted(written),
+            Err(error) => ConfigPersistence::RevisionTrackingError(
+                written,
+                format!(
+                    "failed to write revision sidecar: {error}; config persisted and in-memory revision advanced, but on-disk revision tracking may be stale"
+                ),
+            ),
         }
     }
 
@@ -231,9 +258,19 @@ pub(crate) struct ConfigState {
     config: MeshConfig,
     config_path: PathBuf,
     last_write_config_hash: [u8; 32],
+    /// The config file as this host last read or wrote it, so an apply can
+    /// tell that the CLI or an operator edited the file since.
+    disk_fingerprint: ConfigFileFingerprint,
     apply_serialization_lock: std::sync::Arc<std::sync::Mutex<()>>,
     /// The request-defaults tracker of the node this state belongs to.
     live_request_defaults: std::sync::Arc<LiveRequestDefaults>,
+}
+
+fn write_revision(config_path: &Path, revision: u64) -> std::io::Result<()> {
+    atomic_write(
+        &revision_sidecar_path(config_path),
+        revision.to_string().as_bytes(),
+    )
 }
 
 fn revision_sidecar_path(config_path: &Path) -> PathBuf {
@@ -503,32 +540,81 @@ impl Default for ConfigState {
             config,
             config_path: std::path::PathBuf::from("config.toml"),
             last_write_config_hash: [0xFF; 32],
+            disk_fingerprint: ConfigFileFingerprint::Absent,
             apply_serialization_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
             live_request_defaults: std::sync::Arc::new(LiveRequestDefaults::new()),
         }
     }
 }
 
-impl ConfigState {
-    pub(crate) fn load(path: &Path) -> Result<Self> {
-        let config = load_config(Some(path))?;
-        let revision = read_revision(&revision_sidecar_path(path));
-        let proto = mesh_config_to_proto(&config);
-        let config_hash = canonical_config_hash(&proto);
-        let last_write_config_hash = if path.exists() {
-            local_config_write_hash(&config)
+/// A config file read once, parsed the way the host loads it, with the
+/// fingerprint of the bytes it was parsed from.
+struct DiskConfig {
+    config: MeshConfig,
+    fingerprint: ConfigFileFingerprint,
+    exists: bool,
+}
+
+impl DiskConfig {
+    fn read(path: &Path) -> Result<Self> {
+        Self::from_contents(path, ConfigStore::open(path).read_contents()?)
+    }
+
+    fn from_contents(path: &Path, contents: Option<Vec<u8>>) -> Result<Self> {
+        let config = load_config_contents(path, contents.as_deref())?;
+        Ok(Self {
+            config,
+            fingerprint: ConfigFileFingerprint::of(contents.as_deref()),
+            exists: contents.is_some(),
+        })
+    }
+
+    /// What `last_write_config_hash` holds for this file: no write hash
+    /// matches a missing file, so applying the defaults still creates it.
+    fn write_hash(&self) -> [u8; 32] {
+        if self.exists {
+            local_config_write_hash(&self.config)
         } else {
             [0xFF; 32]
-        };
+        }
+    }
+}
+
+impl ConfigState {
+    pub(crate) fn load(path: &Path) -> Result<Self> {
+        let disk = DiskConfig::read(path)?;
+        let revision = read_revision(&revision_sidecar_path(path));
+        let proto = mesh_config_to_proto(&disk.config);
+        let config_hash = canonical_config_hash(&proto);
+        let last_write_config_hash = disk.write_hash();
         Ok(Self {
             revision,
             config_hash,
-            config,
+            config: disk.config,
             config_path: path.to_path_buf(),
             last_write_config_hash,
+            disk_fingerprint: disk.fingerprint,
             apply_serialization_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
             live_request_defaults: std::sync::Arc::new(LiveRequestDefaults::new()),
         })
+    }
+
+    /// Takes in the config file someone else edited while this host ran, as
+    /// a new revision, so the next apply builds on that edit instead of
+    /// overwriting it. The edit is staged like any saved apply: it takes
+    /// effect on the next restart or apply.
+    fn adopt_config_edited_on_disk(&mut self, contents: Option<Vec<u8>>) -> Result<()> {
+        let disk = DiskConfig::from_contents(&self.config_path, contents)?;
+        let revision = self.revision + 1;
+        self.config_hash = canonical_config_hash(&mesh_config_to_proto(&disk.config));
+        self.last_write_config_hash = disk.write_hash();
+        self.config = disk.config;
+        self.disk_fingerprint = disk.fingerprint;
+        self.revision = revision;
+        if let Err(error) = write_revision(&self.config_path, revision) {
+            tracing::warn!(%error, revision, "failed to record the revision of a config edited on disk");
+        }
+        Ok(())
     }
 
     pub(crate) fn revision(&self) -> u64 {
@@ -559,6 +645,28 @@ impl ConfigState {
                 self.finish_apply(*pending, persistence)
             }
         }
+    }
+
+    /// Applies `edit` to the current config. A caller that edits the current
+    /// config, rather than one it read at an earlier revision, has nothing to
+    /// rebase by hand: when the apply finds the config file edited on disk,
+    /// that edit is taken in and `edit` runs once more on top of it.
+    pub(crate) fn apply_edit<T>(
+        &mut self,
+        mut edit: impl FnMut(&mut MeshConfig) -> T,
+    ) -> (ApplyResult, T) {
+        let expected_revision = self.revision;
+        let mut config = self.config.clone();
+        let edited = edit(&mut config);
+        let result = self.apply(config, expected_revision);
+        if !matches!(result, ApplyResult::RevisionConflict { current_revision }
+            if current_revision != expected_revision)
+        {
+            return (result, edited);
+        }
+        let mut config = self.config.clone();
+        let edited = edit(&mut config);
+        (self.apply(config, self.revision), edited)
     }
 
     pub(crate) fn prepare_apply(
@@ -639,6 +747,7 @@ impl ConfigState {
             revision: self.revision + 1,
             hash: new_hash,
             write_hash: new_write_hash,
+            expected_disk: self.disk_fingerprint.clone(),
             diagnostics,
             logging_requires_restart,
             dynamic_logging_only,
@@ -657,37 +766,57 @@ impl ConfigState {
         pending: PendingConfigApply,
         persistence: ConfigPersistence,
     ) -> ApplyResult {
-        match persistence {
+        let (written, revision_tracking_error) = match persistence {
             ConfigPersistence::PersistError(error) => {
                 record_config_operational_event(ConfigOperationalEvent::ApplyRejected);
-                ApplyResult::PersistError(error)
+                return ApplyResult::PersistError(error);
             }
-            ConfigPersistence::Persisted | ConfigPersistence::RevisionTrackingError(_) => {
-                if self.revision.checked_add(1) != Some(pending.revision) {
-                    record_config_operational_event(ConfigOperationalEvent::ApplyRejected);
-                    return ApplyResult::RevisionConflict {
-                        current_revision: self.revision,
-                    };
-                }
-                self.config = pending.config.clone();
-                self.config_hash = pending.hash;
-                self.last_write_config_hash = pending.write_hash;
-                self.revision = pending.revision;
+            ConfigPersistence::ChangedOnDisk(contents) => {
+                return self.reject_config_edited_on_disk(contents);
+            }
+            ConfigPersistence::Persisted(written) => (written, None),
+            ConfigPersistence::RevisionTrackingError(written, error) => (written, Some(error)),
+        };
+        // The file was saved before this check, so a write that races a
+        // newer revision here still leaves `disk_fingerprint` stale and the
+        // next apply reloads what is on disk rather than overwriting it.
+        if self.revision.checked_add(1) != Some(pending.revision) {
+            record_config_operational_event(ConfigOperationalEvent::ApplyRejected);
+            return ApplyResult::RevisionConflict {
+                current_revision: self.revision,
+            };
+        }
+        self.config = pending.config.clone();
+        self.config_hash = pending.hash;
+        self.last_write_config_hash = pending.write_hash;
+        self.disk_fingerprint = written;
+        self.revision = pending.revision;
 
-                record_config_operational_event(ConfigOperationalEvent::ApplyAccepted);
-                match persistence {
-                    ConfigPersistence::Persisted => pending.applied_result(ConfigApplyMode::Staged),
-                    ConfigPersistence::RevisionTrackingError(error) => {
-                        ApplyResult::PersistedWithRevisionTrackingError {
-                            revision: self.revision,
-                            hash: self.config_hash,
-                            error,
-                            diagnostics: pending.diagnostics.clone(),
-                        }
-                    }
-                    ConfigPersistence::PersistError(_) => unreachable!("handled above"),
-                }
-            }
+        record_config_operational_event(ConfigOperationalEvent::ApplyAccepted);
+        match revision_tracking_error {
+            None => pending.applied_result(ConfigApplyMode::Staged),
+            Some(error) => ApplyResult::PersistedWithRevisionTrackingError {
+                revision: self.revision,
+                hash: self.config_hash,
+                error,
+                diagnostics: pending.diagnostics.clone(),
+            },
+        }
+    }
+
+    /// The apply was based on a config that someone else has since changed
+    /// on disk. Take their edit in as the current revision and report a
+    /// conflict, so the caller rebases on it instead of losing it.
+    fn reject_config_edited_on_disk(&mut self, contents: Option<Vec<u8>>) -> ApplyResult {
+        record_config_operational_event(ConfigOperationalEvent::ApplyRejected);
+        match self.adopt_config_edited_on_disk(contents) {
+            Ok(()) => ApplyResult::RevisionConflict {
+                current_revision: self.revision,
+            },
+            Err(error) => ApplyResult::PersistError(format!(
+                "config file {} was edited while the host was running and could not be loaded, so the apply was not saved over it: {error:#}",
+                self.config_path.display()
+            )),
         }
     }
 
@@ -734,18 +863,18 @@ where
     let request_defaults_attempted = pending.changes_request_defaults();
     let live_request_defaults_applied = pending.apply_live_request_defaults();
     let persistence = persist(&pending);
-    if live_logging_applied && matches!(&persistence, ConfigPersistence::PersistError(_)) {
+    if live_logging_applied && persistence.left_file_unchanged() {
         // A persistence failure after a live apply is rare, but restore the
         // prior runtime settings before exposing the failure so the
         // configuration and service do not diverge.
         pending.restore_live_logging();
     }
-    if matches!(&persistence, ConfigPersistence::PersistError(_))
+    if persistence.left_file_unchanged()
         && let Some(rollback) = live_kv_disk_rollback
     {
         super::kv_disk_config::restore_live_kv_disk_limits(rollback);
     }
-    if request_defaults_attempted && matches!(&persistence, ConfigPersistence::PersistError(_)) {
+    if request_defaults_attempted && persistence.left_file_unchanged() {
         pending.restore_live_request_defaults();
     }
     let fully_live = pending.fully_live(

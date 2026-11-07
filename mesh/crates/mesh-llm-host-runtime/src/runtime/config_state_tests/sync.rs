@@ -175,7 +175,7 @@ fn prepared_apply_keeps_config_and_hash_atomic_until_persistence_completes() {
 
     let persistence = pending.persist();
     assert!(
-        matches!(&persistence, ConfigPersistence::Persisted),
+        matches!(&persistence, ConfigPersistence::Persisted(_)),
         "persistence should succeed: {persistence:?}"
     );
     assert!(config_path.exists(), "persistence should write config.toml");

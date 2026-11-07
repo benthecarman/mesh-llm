@@ -72,6 +72,41 @@ pub fn create_private_file_if_absent(target: &Path, contents: &[u8]) -> io::Resu
     result
 }
 
+/// Opens, creating it if needed, the empty file that writers of `target`
+/// lock to take turns. The file sits beside `target` in the same private
+/// directory and is never written, so it only needs to exist; a new one is
+/// readable by the owner only on Unix.
+pub(crate) fn open_lock_file(target: &Path) -> io::Result<fs::File> {
+    reject_link_or_special(target)?;
+    let parent = match target.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    create_private_dirs(parent)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(target)?;
+    if is_link_or_reparse_point(&file.metadata()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "config lock path must not be a link",
+        ));
+    }
+    Ok(file)
+}
+
 pub(crate) fn write_private_file(target: &Path, contents: &[u8]) -> io::Result<()> {
     reject_link_or_special(target)?;
     let parent = match target.parent() {
