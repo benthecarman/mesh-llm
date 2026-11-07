@@ -69,6 +69,7 @@ async fn membership_peer_request_executes_on_the_nodes_local_model() {
         MODEL.to_owned(),
         vec![election::InferenceTarget::Local(port)],
     );
+    crate::mesh::tests::runtime_instance_admission::serve_local_targets(&node, &targets);
     let (_targets_tx, targets_rx) = watch::channel(targets);
 
     let (membership, channels) = membership_of(&node, &[&team]).await;

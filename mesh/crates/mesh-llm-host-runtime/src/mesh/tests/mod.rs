@@ -5,6 +5,7 @@ use mesh_llm_types::mesh::{DEMAND_TTL_SECS, merge_demand};
 
 mod control_listener;
 mod memberships;
+pub(crate) mod runtime_instance_admission;
 mod signed_gossip;
 
 include!("connections.rs");

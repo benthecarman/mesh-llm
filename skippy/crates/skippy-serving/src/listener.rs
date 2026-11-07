@@ -15,7 +15,7 @@ use tokio::net::TcpListener;
 const SERVE_LISTEN_BACKLOG: i32 = 1024;
 
 /// Bind a serving TCP listener with [`SERVE_LISTEN_BACKLOG`].
-pub(crate) fn bind_serve_listener(bind_addr: SocketAddr) -> Result<TcpListener> {
+pub fn bind_serve_listener(bind_addr: SocketAddr) -> Result<TcpListener> {
     let domain = match bind_addr {
         SocketAddr::V4(_) => socket2::Domain::IPV4,
         SocketAddr::V6(_) => socket2::Domain::IPV6,

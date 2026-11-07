@@ -167,6 +167,7 @@ async fn inbound_quic_http_dispatches_without_local_api_listener() {
         "test".to_string(),
         vec![election::InferenceTarget::Local(upstream_port)],
     );
+    crate::mesh::tests::runtime_instance_admission::serve_local_targets(&receiver, &targets);
     let (_target_tx, target_rx) = watch::channel(targets);
     let tunnel_manager = TunnelManager::start(
         receiver.clone(),

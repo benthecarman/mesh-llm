@@ -3088,6 +3088,7 @@ async fn mesh_candidate_that_admits_the_request_still_wins_over_the_plugin() {
         model.to_string(),
         vec![election::InferenceTarget::Local(local_port)],
     );
+    crate::mesh::tests::runtime_instance_admission::serve_local_targets(&node, &targets);
 
     let plugin_port = spawn_answering_chat_backend("from-plugin").await;
     let plugin_manager = empty_test_plugin_manager();

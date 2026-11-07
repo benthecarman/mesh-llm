@@ -143,7 +143,7 @@ pub(super) async fn start_local_speech_model(
         model.clone(),
         lanes,
         spec.http_bind_addr,
-    );
+    )?;
     let (death_tx, death_rx) = tokio::sync::oneshot::channel();
     Ok((
         model_name,

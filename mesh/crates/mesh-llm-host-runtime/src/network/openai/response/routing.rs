@@ -85,7 +85,7 @@ async fn served_model_headers_for_mesh_peer(
 async fn acquire_local_attempt_upstream(
     node: &mesh::Node,
     port: u16,
-) -> Result<(Option<crate::runtime::InstanceRequestGuard>, TcpStream), ()> {
+) -> Result<(crate::runtime::InstanceRequestGuard, TcpStream), ()> {
     let instance_request = node
         .begin_runtime_instance_request(port)
         .await

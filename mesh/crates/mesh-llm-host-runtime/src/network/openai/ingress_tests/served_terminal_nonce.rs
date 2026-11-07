@@ -134,6 +134,7 @@ async fn serve_on_b(forwarded: &[u8], requested_by: String) -> OpenAiExchangeEnv
         MODEL.into(),
         vec![election::InferenceTarget::Local(chat_backend().await)],
     );
+    crate::mesh::tests::runtime_instance_admission::serve_local_targets(&node, &targets);
     let affinity = affinity::AffinityRouter::new();
     let recording = RecordingChannel::default();
     let mut request = ingress(forwarded).await;

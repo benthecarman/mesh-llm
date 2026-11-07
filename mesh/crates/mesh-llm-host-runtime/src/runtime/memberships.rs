@@ -549,6 +549,7 @@ mod tests {
             node.owner_keypair = Some(crate::crypto::OwnerKeypair::generate());
         }
         node.quic_bind.ip = Some(std::net::Ipv4Addr::LOCALHOST.into());
+        crate::mesh::tests::runtime_instance_admission::serve_local_targets(&node, &targets);
         let (targets_tx, targets) = tokio::sync::watch::channel(targets);
         let ctx = MembershipContext {
             options: Arc::new(RuntimeOptions {

@@ -436,6 +436,34 @@ pub fn start_openai_backend_with_tokenizer(
 }
 
 fn spawn_openai_backend(bind_addr: SocketAddr, router: Router) -> EmbeddedServerHandle {
+    spawn_openai_backend_with_listener(bind_addr, router, async move {
+        Ok(tokio::net::TcpListener::bind(bind_addr).await?)
+    })
+}
+
+/// Serve `router` on a listener the caller already bound.
+///
+/// The caller keeps the port from bind until this server accepts on it, so
+/// no other process can take an address between choosing and serving it.
+fn spawn_openai_backend_on(
+    listener: tokio::net::TcpListener,
+    router: Router,
+) -> Result<EmbeddedServerHandle> {
+    let bind_addr = listener
+        .local_addr()
+        .context("read OpenAI backend listener address")?;
+    Ok(spawn_openai_backend_with_listener(
+        bind_addr,
+        router,
+        std::future::ready(Ok(listener)),
+    ))
+}
+
+fn spawn_openai_backend_with_listener(
+    bind_addr: SocketAddr,
+    router: Router,
+    listener: impl std::future::Future<Output = Result<tokio::net::TcpListener>> + Send + 'static,
+) -> EmbeddedServerHandle {
     let status = Arc::new(Mutex::new(ServerHandleState {
         name: "openai-backend",
         bind_addr,
@@ -451,7 +479,7 @@ fn spawn_openai_backend(bind_addr: SocketAddr, router: Router) -> EmbeddedServer
     let task_status = status.clone();
     let task = tokio::spawn(async move {
         let result = async {
-            let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+            let listener = listener.await?;
             {
                 let mut status = task_status.lock().expect("server status lock poisoned");
                 status.state = EmbeddedState::Ready;
@@ -483,30 +511,32 @@ pub(crate) fn openai_backend_router(
 
 /// Start an OpenAI backend with an optional metadata-only lifecycle observer.
 ///
-/// The existing [`start_openai_backend`] entry point retains the no-observer
-/// behavior for embedders that do not own a logging runtime.
+/// The server accepts on `listener`, which the caller has already bound (see
+/// [`crate::listener::bind_serve_listener`]). The existing
+/// [`start_openai_backend`] entry point retains the no-observer behavior for
+/// embedders that do not own a logging runtime.
 pub fn start_openai_backend_with_lifecycle_observer(
-    bind_addr: SocketAddr,
+    listener: tokio::net::TcpListener,
     backend: Arc<dyn InferenceBackend>,
     lifecycle_observer: Option<Arc<dyn InferenceLifecycleObserver>>,
-) -> EmbeddedServerHandle {
-    spawn_openai_backend(
-        bind_addr,
+) -> Result<EmbeddedServerHandle> {
+    spawn_openai_backend_on(
+        listener,
         openai_backend_router_with_lifecycle_observer(backend, lifecycle_observer),
     )
 }
 
 /// Start a tokenizer-aware OpenAI backend with an optional metadata-only
-/// lifecycle observer.
+/// lifecycle observer, accepting on the caller's already bound `listener`.
 pub fn start_openai_backend_with_tokenizer_and_lifecycle_observer(
-    bind_addr: SocketAddr,
+    listener: tokio::net::TcpListener,
     backend: Arc<dyn InferenceBackend>,
     tokenizer: TokenizerCapability,
     lifecycle_observer: Option<Arc<dyn InferenceLifecycleObserver>>,
-) -> EmbeddedServerHandle {
+) -> Result<EmbeddedServerHandle> {
     let router = openai_backend_router_with_lifecycle_observer(backend, lifecycle_observer)
         .merge(tokenizer_http_router(tokenizer));
-    spawn_openai_backend(bind_addr, router)
+    spawn_openai_backend_on(listener, router)
 }
 
 fn openai_backend_router_with_lifecycle_observer(
@@ -1074,5 +1104,44 @@ mod lifecycle_tests {
                 .await
                 .expect("router response");
         assert_eq!(legacy_response.status(), StatusCode::OK);
+    }
+    #[tokio::test]
+    async fn backend_serves_on_the_listener_its_caller_bound() {
+        let listener =
+            crate::listener::bind_serve_listener("127.0.0.1:0".parse().expect("address"))
+                .expect("bind listener");
+        let address = listener.local_addr().expect("listener address");
+        let server =
+            start_openai_backend_with_lifecycle_observer(listener, Arc::new(ModelsBackend), None)
+                .expect("start backend");
+        assert_eq!(server.status().bind_addr, address);
+        // The port is never released between the caller's bind and the server.
+        let error = crate::listener::bind_serve_listener(address)
+            .expect_err("the server keeps the caller's port");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .expect("io error")
+                .kind(),
+            std::io::ErrorKind::AddrInUse
+        );
+
+        let response = tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
+            let mut stream = std::net::TcpStream::connect(address)?;
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(60)))?;
+            stream.write_all(
+                b"GET /v1/models HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )?;
+            let mut response = String::new();
+            stream.read_to_string(&mut response)?;
+            Ok::<_, std::io::Error>(response)
+        })
+        .await
+        .expect("request task")
+        .expect("request");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("embedded-model"), "{response}");
+        server.shutdown().await.expect("server shutdown");
     }
 }

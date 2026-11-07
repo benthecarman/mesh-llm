@@ -571,6 +571,10 @@ pub(crate) enum InstanceLifecycleError {
 pub(crate) enum InstanceAdmissionError {
     #[error("runtime instance is not accepting work while {state:?}")]
     NotAccepting { state: InstanceLifecycleState },
+    /// No lifecycle owns this local port: it was never registered, or its
+    /// instance already unregistered while a stale target still names it.
+    #[error("no runtime instance lifecycle owns local port {port}")]
+    Unregistered { port: u16 },
 }
 
 // ── Drain Coordinator ────────────────────────────────────────────────────────

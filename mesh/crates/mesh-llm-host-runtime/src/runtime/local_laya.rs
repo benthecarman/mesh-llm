@@ -235,7 +235,7 @@ pub(super) async fn start_local_laya_model(
         models::runtime_media_capability_evidence(None).await,
     );
     capabilities.upgrade_system_one(models::CapabilityLevel::Supported);
-    let http = skippy::start_laya_http_on(&model_name, model.clone(), spec.http_bind_addr);
+    let http = skippy::start_laya_http_on(&model_name, model.clone(), spec.http_bind_addr)?;
     let (death_tx, death_rx) = tokio::sync::oneshot::channel();
     Ok((
         model_name,

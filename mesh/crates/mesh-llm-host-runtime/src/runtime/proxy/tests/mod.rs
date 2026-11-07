@@ -17,6 +17,7 @@ use tokio::sync::{oneshot, watch};
 // Routing fixtures also publish positive LLM evidence, just as real loaded
 // runtimes do. Compatibility discovery intentionally excludes legacy unknowns.
 async fn advertise_test_targets(node: &mesh::Node, targets: &election::ModelTargets) {
+    crate::mesh::tests::runtime_instance_admission::serve_local_targets(node, targets);
     let names = callable_models(targets);
     node.set_hosted_models(names.clone()).await;
     node.set_served_model_descriptors(

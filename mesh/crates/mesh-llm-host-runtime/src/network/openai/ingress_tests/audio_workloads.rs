@@ -52,6 +52,7 @@ async fn route_audio(path: &str, chunked: bool) {
         MODEL.into(),
         vec![election::InferenceTarget::Local(backend_port)],
     );
+    crate::mesh::tests::runtime_instance_admission::serve_local_targets(&node, &targets);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let ingress = tokio::spawn(async move {

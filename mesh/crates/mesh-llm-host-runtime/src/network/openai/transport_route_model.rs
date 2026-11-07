@@ -1190,6 +1190,7 @@ mod tests {
                 .map(|port| election::InferenceTarget::Local(*port))
                 .collect(),
         );
+        crate::mesh::tests::runtime_instance_admission::serve_local_targets(&node, &targets);
 
         let request_body = r#"{"model":"qwen","messages":[{"role":"user","content":"hi"}]}"#;
         let raw = format!(
@@ -1372,6 +1373,7 @@ mod tests {
                 .map(|port| election::InferenceTarget::Local(*port))
                 .collect(),
         );
+        crate::mesh::tests::runtime_instance_admission::serve_local_targets(&node, &targets);
 
         let request_body = r#"{"model":"qwen","messages":[{"role":"user","content":"hi"}]}"#;
         let raw = format!(

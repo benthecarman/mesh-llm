@@ -221,6 +221,10 @@ impl LiveHost {
     pub(super) async fn connection(&self) -> (tokio::net::TcpStream, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        crate::mesh::tests::runtime_instance_admission::serve_local_targets(
+            &self.node,
+            &self.targets,
+        );
         let node = self.node.clone();
         let targets = self.targets.clone();
         let handler = tokio::spawn(async move {

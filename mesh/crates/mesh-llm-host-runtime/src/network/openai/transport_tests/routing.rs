@@ -674,6 +674,7 @@ async fn routed_completion_http_boundary_preserves_configured_served_alias() -> 
     });
     let (downstream_stream, _) = downstream.accept().await?;
     let node = mesh::Node::new_for_tests(mesh::NodeRole::Client).await?;
+    node.register_serving_local_port(backend_port);
     let request_body = r#"{"model":"public-model","messages":[{"role":"user","content":"hello"}]}"#;
     let prefetched = format!(
         "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",

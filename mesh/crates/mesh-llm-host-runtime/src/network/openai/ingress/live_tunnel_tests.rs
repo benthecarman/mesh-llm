@@ -42,6 +42,7 @@ async fn quic_request_with_id(host: &LiveHost, body: &[u8], exchange_id: uuid::U
     let tunnels = Manager::start(host.node.clone(), legacy_rx, http_rx, stage_rx)
         .await
         .unwrap();
+    crate::mesh::tests::runtime_instance_admission::serve_local_targets(&host.node, &host.targets);
     let (_targets_tx, targets_rx) = tokio::sync::watch::channel(host.targets.clone());
     tunnels.set_http_ingress(targets_rx, AffinityRouter::new());
     let serving_node = host.node.clone();
@@ -282,6 +283,10 @@ async fn installed_lifecycle_quic_gateway_and_server_share_exchange_identity() {
     let tunnels = Manager::start(seller.node.clone(), legacy_rx, http_rx, stage_rx)
         .await
         .unwrap();
+    crate::mesh::tests::runtime_instance_admission::serve_local_targets(
+        &seller.node,
+        &seller.targets,
+    );
     let (_targets_tx, targets_rx) = tokio::sync::watch::channel(seller.targets.clone());
     tunnels.set_http_ingress(targets_rx, AffinityRouter::new());
     let serving_node = seller.node.clone();

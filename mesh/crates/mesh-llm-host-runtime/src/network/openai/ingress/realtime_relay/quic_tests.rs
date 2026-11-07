@@ -37,6 +37,7 @@ async fn speech_host(port: u16) -> (Node, ModelTargets) {
     targets
         .targets
         .insert(MODEL.into(), vec![InferenceTarget::Local(port)]);
+    crate::mesh::tests::runtime_instance_admission::serve_local_targets(&node, &targets);
     (node, targets)
 }
 

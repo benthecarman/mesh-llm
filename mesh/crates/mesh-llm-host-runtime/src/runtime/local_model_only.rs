@@ -381,6 +381,9 @@ async fn run_loaded_local_model(
     // fixes deferral D2) -- degrade rather than fabricate an uncorrelated
     // root.
     let (_, model, _death_rx) = start_local_openai_model(launch, model_name, None).await?;
+    // The server reports the port it bound, which differs from a configured
+    // port 0; readiness and the advertised URL use the bound one.
+    let bind_addr = SocketAddr::new(bind_addr.ip(), model.port);
     if let Err(error) = wait_for_openai_ready(&model, bind_addr).await {
         model.shutdown().await;
         return Err(error);

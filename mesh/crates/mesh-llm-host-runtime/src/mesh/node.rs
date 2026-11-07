@@ -1441,6 +1441,24 @@ impl Node {
             .insert(port, lifecycle);
     }
 
+    /// Register an always-serving lifecycle for a local port that no managed
+    /// runtime instance owns, such as a shared-serving membership ingress.
+    /// An existing registration is kept, so its in-flight count stays whole.
+    pub(crate) fn register_serving_local_port(&self, port: u16) {
+        self.runtime_instance_lifecycles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(port)
+            .or_insert_with(|| {
+                Arc::new(tokio::sync::Mutex::new(
+                    crate::runtime::InstanceLifecycleRecord::new(
+                        crate::runtime::InstanceLifecycleState::Serving,
+                        1,
+                    ),
+                ))
+            });
+    }
+
     pub(crate) fn unregister_runtime_instance_lifecycle(&self, port: u16) {
         self.runtime_instance_lifecycles
             .lock()
@@ -1448,11 +1466,14 @@ impl Node {
             .remove(&port);
     }
 
+    /// Admit one request to the local instance serving `port`.
+    ///
+    /// A port without a registered lifecycle is not accepting: admitting it
+    /// would run work that drain and unload cannot see.
     pub(crate) async fn begin_runtime_instance_request(
         &self,
         port: u16,
-    ) -> Result<Option<crate::runtime::InstanceRequestGuard>, crate::runtime::InstanceAdmissionError>
-    {
+    ) -> Result<crate::runtime::InstanceRequestGuard, crate::runtime::InstanceAdmissionError> {
         let lifecycle = self
             .runtime_instance_lifecycles
             .lock()
@@ -1460,7 +1481,7 @@ impl Node {
             .get(&port)
             .cloned();
         let Some(lifecycle) = lifecycle else {
-            return Ok(None);
+            return Err(crate::runtime::InstanceAdmissionError::Unregistered { port });
         };
         let residency = match self.native_model_lifecycle.get() {
             Some(service) => service.lease_port(port).await,
@@ -1472,10 +1493,10 @@ impl Node {
                 state: record.state(),
             });
         }
-        Ok(Some(
+        Ok(
             crate::runtime::InstanceRequestGuard::new(record.in_flight_tracker())
                 .with_residency(residency),
-        ))
+        )
     }
 
     pub(crate) async fn refresh_served_model_descriptors(&self) {

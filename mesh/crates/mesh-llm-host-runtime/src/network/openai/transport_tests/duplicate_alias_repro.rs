@@ -141,6 +141,7 @@ async fn duplicate_host_request(
         let mut targets = election::ModelTargets::default();
         let candidates = duplicate_candidates(node.id(), a.id(), b.id(), port, available);
         targets.targets.insert(INTERNAL.to_owned(), candidates);
+        crate::mesh::tests::runtime_instance_admission::serve_local_targets(node, &targets);
         let (tx, rx) = watch::channel(targets);
         let manager =
             TunnelManager::start(node.clone(), channels.rpc, channels.http, channels.stage)

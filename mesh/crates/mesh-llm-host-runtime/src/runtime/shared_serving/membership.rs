@@ -177,11 +177,18 @@ impl Membership {
         };
         let mut targets = ModelTargets::default();
         if ready {
+            // The ingress admits a local port only while a lifecycle owns it,
+            // so register one before publishing the target.
+            self.node.register_serving_local_port(self.http_port);
             targets
                 .targets
                 .insert(model, vec![InferenceTarget::Local(self.http_port)]);
         }
         self.targets.send_replace(targets);
+        if !ready {
+            self.node
+                .unregister_runtime_instance_lifecycle(self.http_port);
+        }
         self.node.set_models(models.clone()).await;
         self.node.set_hosted_models(models.clone()).await;
         self.node.set_serving_models(models).await;

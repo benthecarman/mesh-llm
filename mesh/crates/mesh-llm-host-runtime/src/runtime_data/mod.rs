@@ -1878,6 +1878,7 @@ pub(crate) mod tests {
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 69\r\n\r\n{\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":7,\"total_tokens\":10}}",
         )
         .await;
+        node.register_serving_local_port(upstream_port);
         let (proxy_stream, client_reader) = connected_proxy_stream().await;
 
         let routed = transport::route_to_target(

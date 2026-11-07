@@ -381,7 +381,8 @@ pub(in crate::runtime) async fn startup_handle_replace_event(
     let old_port = old_handle.port;
     let old_context_length = old_handle.context_length;
     remove_runtime_local_target(ctx.target_tx, &old_loaded_name, old_port);
-    add_runtime_local_target(ctx.target_tx, &next.loaded_name, next.handle.port);
+    // `startup_register_loaded_runtime` publishes the new target once its
+    // lifecycle owns the port; a target published earlier would be refused.
     if old_loaded_name != next.loaded_name
         && startup_unregister_runtime_instance(ctx, &old_loaded_name).await
     {

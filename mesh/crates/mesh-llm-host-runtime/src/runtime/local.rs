@@ -429,6 +429,12 @@ pub(super) fn resolve_local_openai_skippy_config(
     Ok(resolved)
 }
 
+/// Pick a free loopback port by binding and releasing it.
+///
+/// The port is unowned between this return and the later bind, so another
+/// process can take it. Model HTTP servers do not use this: they bind port 0
+/// and keep the listener. It remains only for the split stage-0 return
+/// address, which the Skippy runtime binds itself from a configured address.
 pub(super) async fn alloc_local_port() -> Result<u16> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
@@ -844,8 +850,9 @@ pub(super) async fn start_runtime_local_model(
         .capacity_budget_bytes
         .or_else(|| spec.pinned_gpu.map(|gpu| gpu.allocatable_vram_bytes()))
         .unwrap_or_else(|| spec.node.vram_bytes());
-    let http_port = alloc_local_port().await?;
-    let http_bind_addr = ([127, 0, 0, 1], http_port).into();
+    // Port 0: the model server binds its own listener and keeps it, and the
+    // started handle reports the port it got.
+    let http_bind_addr = ([127, 0, 0, 1], 0).into();
     let hook_policy = Some(crate::plugin::exchange_policy::compose_node_hooks(
         spec.node.clone(),
     ));
@@ -888,7 +895,8 @@ pub(super) async fn start_runtime_local_model(
     // that never started serving. On failure the hash task is left detached
     // rather than aborted: it still populates the persisted cache for a
     // later retry, it just never touches the descriptor.
-    if start_result.is_ok() {
+    if let Ok((_, handle, _)) = &start_result {
+        let http_port = handle.port;
         let generation = spec
             .node
             .begin_served_model_generation(runtime_model_name)

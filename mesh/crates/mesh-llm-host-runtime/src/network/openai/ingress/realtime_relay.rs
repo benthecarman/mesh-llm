@@ -122,23 +122,13 @@ pub(super) async fn relay(
 /// Relays an admitted session to its host and logs how it ended.
 async fn run_session(
     node: &mesh::Node,
-    mut client: ClientStream,
+    client: ClientStream,
     raw: &[u8],
     model: &str,
     target: InferenceTarget,
 ) {
-    let _instance = if let InferenceTarget::Local(port) = target {
-        match node.begin_runtime_instance_request(port).await {
-            Ok(guard) => guard,
-            Err(_) => {
-                let _ =
-                    crate::network::openai::send_503(client, "local realtime instance is draining")
-                        .await;
-                return;
-            }
-        }
-    } else {
-        None
+    let Some((mut client, _instance)) = admit_local_session(node, client, &target).await else {
+        return;
     };
     let opening = upgrade_request(raw, model);
     let started = Instant::now();
@@ -149,6 +139,30 @@ async fn run_session(
         InferenceTarget::None => Err(anyhow::anyhow!("no target")),
     };
     log_session_end(model, started.elapsed().as_secs(), result);
+}
+
+/// Track a local session against its instance lifecycle. A port no serving
+/// lifecycle owns is refused with a 503, consuming the client (`None`).
+async fn admit_local_session(
+    node: &mesh::Node,
+    client: ClientStream,
+    target: &InferenceTarget,
+) -> Option<(ClientStream, Option<crate::runtime::InstanceRequestGuard>)> {
+    let InferenceTarget::Local(port) = *target else {
+        return Some((client, None));
+    };
+    match node.begin_runtime_instance_request(port).await {
+        Ok(guard) => Some((client, Some(guard))),
+        Err(error) => {
+            tracing::debug!(%error, port, "local realtime instance refused a session");
+            let _ = crate::network::openai::send_503(
+                client,
+                "local realtime instance is not accepting sessions",
+            )
+            .await;
+            None
+        }
+    }
 }
 
 fn log_session_end(model: &str, seconds: u64, result: anyhow::Result<SessionEnd>) {

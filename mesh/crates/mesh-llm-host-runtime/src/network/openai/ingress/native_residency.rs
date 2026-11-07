@@ -430,6 +430,8 @@ alias = "public-alias"
                     ..Default::default()
                 }])
                 .await;
+                // A real load registers the lifecycle before publishing the port.
+                node.register_serving_local_port(port);
                 targets.send_modify(|targets| {
                     targets.targets.insert(
                         "public-alias".into(),

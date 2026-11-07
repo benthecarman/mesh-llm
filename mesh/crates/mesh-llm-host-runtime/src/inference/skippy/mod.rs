@@ -302,7 +302,8 @@ pub(crate) fn start_laya_http_on(
     model_id: &str,
     model: Arc<skippy_runtime::LayaModel>,
     bind_addr: std::net::SocketAddr,
-) -> SkippyHttpHandle {
+) -> Result<SkippyHttpHandle> {
+    let (listener, port) = bind_model_http_listener(bind_addr)?;
     let lifecycle_observer = crate::plugin::inference_observation::adapter::observe_frontend(
         crate::network::openai::runtime_events::compose_lifecycle_observer(
             crate::logging_runtime_state().and_then(|state| state.openai_lifecycle_observer()),
@@ -310,14 +311,11 @@ pub(crate) fn start_laya_http_on(
         model_id,
     );
     let server = skippy_serving::start_openai_backend_with_lifecycle_observer(
-        bind_addr,
+        listener,
         Arc::new(skippy_serving::LayaSystemOneBackend::new(model_id, model)),
         lifecycle_observer,
-    );
-    SkippyHttpHandle {
-        port: bind_addr.port(),
-        server,
-    }
+    )?;
+    Ok(SkippyHttpHandle { port, server })
 }
 
 pub(crate) fn load_speech_recognition_model(
@@ -335,7 +333,8 @@ pub(crate) fn start_speech_recognition_http_on(
     model: Arc<skippy_runtime::SpeechRecognitionModel>,
     concurrency: usize,
     bind_addr: std::net::SocketAddr,
-) -> SkippyHttpHandle {
+) -> Result<SkippyHttpHandle> {
+    let (listener, port) = bind_model_http_listener(bind_addr)?;
     let lifecycle_observer = crate::plugin::inference_observation::adapter::observe_frontend(
         crate::network::openai::runtime_events::compose_lifecycle_observer(
             crate::logging_runtime_state().and_then(|state| state.openai_lifecycle_observer()),
@@ -343,18 +342,31 @@ pub(crate) fn start_speech_recognition_http_on(
         model_id,
     );
     let server = skippy_serving::start_openai_backend_with_lifecycle_observer(
-        bind_addr,
+        listener,
         Arc::new(skippy_serving::SpeechRecognitionBackend::new(
             model_id,
             model,
             concurrency,
         )),
         lifecycle_observer,
-    );
-    SkippyHttpHandle {
-        port: bind_addr.port(),
-        server,
-    }
+    )?;
+    Ok(SkippyHttpHandle { port, server })
+}
+
+/// Bind the address a local model HTTP server accepts on.
+///
+/// The server is handed this listener rather than an address, so the port is
+/// owned from the moment it is chosen until the server stops. For a `:0`
+/// address the returned port is the one the kernel assigned.
+fn bind_model_http_listener(
+    bind_addr: std::net::SocketAddr,
+) -> Result<(tokio::net::TcpListener, u16)> {
+    let listener = skippy_serving::listener::bind_serve_listener(bind_addr)?;
+    let port = listener
+        .local_addr()
+        .with_context(|| format!("read local model HTTP listener address for {bind_addr}"))?
+        .port();
+    Ok((listener, port))
 }
 
 impl SkippyHttpHandle {
@@ -391,15 +403,12 @@ impl SkippyModelHandle {
         Some(guardrails.status())
     }
 
-    pub(crate) fn start_http(&self, port: u16) -> Result<SkippyHttpHandle> {
-        self.start_http_on(([127, 0, 0, 1], port).into())
-    }
-
+    /// Serve this model's OpenAI surface on `bind_addr`; a `:0` port picks a
+    /// free one, reported by [`SkippyHttpHandle::port`].
     pub(crate) fn start_http_on(
         &self,
         bind_addr: std::net::SocketAddr,
     ) -> Result<SkippyHttpHandle> {
-        let port = bind_addr.port();
         let tokenizer = self
             .runtime
             .tokenizer_capability()
@@ -410,12 +419,13 @@ impl SkippyModelHandle {
             ),
             &self.config.model_id,
         );
+        let (listener, port) = bind_model_http_listener(bind_addr)?;
         let server = skippy_serving::start_openai_backend_with_tokenizer_and_lifecycle_observer(
-            bind_addr,
+            listener,
             self.backend(),
             tokenizer,
             lifecycle_observer,
-        );
+        )?;
         Ok(SkippyHttpHandle { port, server })
     }
 
@@ -732,6 +742,18 @@ mod tests {
             reasoning_parser: Some(true),
             efforts: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
         }
+    }
+
+    #[tokio::test]
+    async fn model_http_listener_reports_and_holds_its_assigned_port() {
+        let (listener, port) =
+            bind_model_http_listener(([127, 0, 0, 1], 0).into()).expect("bind ephemeral port");
+        assert_ne!(port, 0, "a :0 bind reports the kernel-assigned port");
+        assert_eq!(listener.local_addr().unwrap().port(), port);
+        assert!(
+            std::net::TcpListener::bind(("127.0.0.1", port)).is_err(),
+            "the listener owns its port until the server drops it"
+        );
     }
 
     #[test]
