@@ -307,8 +307,12 @@ Receivers apply these rules to every kind:
    record whenever its body changes; an unchanged node record is re-signed
    every 15 minutes, and cache affinity is re-signed every gossip round
    because its advertisement time changes.
-4. In compatibility mode, an accepted node record replaces the frame's unsigned
-   entry for the same node, and accepted cache affinity replaces the unsigned copy.
+4. In compatibility mode, a signed node record replaces the frame's unsigned
+   entry for the same node: one accepted from the frame, or else a fresh record
+   the receiver already holds, so a relay cannot override a node's signed
+   description by leaving its record out or sending an older one. The replaced
+   entry keeps the relay's hop measurements. Accepted cache affinity replaces
+   the unsigned copy.
    The sender's own unsigned entry is always applied, because the connection
    authenticates it and it carries the direct-only data.
 
@@ -319,8 +323,14 @@ mode for the whole mesh. The default is `false`, including policies created
 before the field existed. Compatibility mode keeps unsigned `peers` copies,
 including cache affinity, so nodes predating signed records can still relay
 topology. It also keeps the old fallback: a relay can misdescribe another node
-when no accepted signed record replaces its unsigned entry. Compatibility
-mode must not be described as protecting against malicious relays.
+when the receiver neither accepts a signed record for it from the frame nor
+holds a fresh one. While the receiver holds a fresh record, relays that do not
+forward newer records cannot update that node's description: a node reachable
+only through such relays, for example one that changed its models or
+addresses or stopped signing after a downgrade, is described by its last
+signed record until that record expires (at most one hour), unless it reaches
+the receiver directly. Compatibility mode must not be described as protecting
+against malicious relays.
 
 With `require_signed_gossip = true`, receivers discard **every** unsigned
 third-party entry, even if its signed twin is missing, invalid, expired, or

@@ -22,6 +22,15 @@ fn signing_key(seed: u8) -> ed25519_dalek::SigningKey {
 /// A worker's signed record, with a field this build does not know appended
 /// to show relays keep bytes they cannot interpret.
 fn signed_worker_record(seed: u8, seq: u64, model: &str) -> crate::proto::node::SignedNodeRecord {
+    signed_worker_record_at(seed, seq, model, current_time_unix_ms())
+}
+
+fn signed_worker_record_at(
+    seed: u8,
+    seq: u64,
+    model: &str,
+    issued_at_unix_ms: u64,
+) -> crate::proto::node::SignedNodeRecord {
     let mut body = crate::proto::node::NodeRecord {
         role: crate::proto::node::NodeRole::Worker as i32,
         version: crate::VERSION.to_string(),
@@ -35,7 +44,7 @@ fn signed_worker_record(seed: u8, seq: u64, model: &str) -> crate::proto::node::
         NODE_RECORD,
         &signing_key(seed),
         seq,
-        current_time_unix_ms(),
+        issued_at_unix_ms,
         &body,
     );
     crate::proto::node::SignedNodeRecord {
@@ -256,7 +265,7 @@ async fn record_replaces_its_unsigned_twin_but_keeps_its_cache_affinity() {
 }
 
 #[tokio::test]
-async fn unsigned_announcements_from_older_relays_still_apply() {
+async fn held_record_outranks_a_relays_unsigned_entry() {
     let node = Node::new_for_tests(NodeRole::Worker).await.unwrap();
     receive(
         &node,
@@ -266,7 +275,158 @@ async fn unsigned_announcements_from_older_relays_still_apply() {
     )
     .await;
 
-    // A relay that predates signed records only sends unsigned entries.
+    // A relay that predates signed records, or one that leaves the record
+    // out, only sends its own claim about the node.
+    let mut claim = unsigned_worker(0x61, "unsigned-model");
+    claim.1.latency_ms = Some(42);
+    claim.1.cache_affinity = unsigned_cache_affinity("signed-model", 3);
+    let resolved = receive(&node, 0x63, vec![claim], Vec::new()).await;
+
+    let (_, entry) = resolved
+        .iter()
+        .find(|(addr, _)| addr.id == test_endpoint_id(0x61))
+        .expect("the relay still vouches for the node's reachability");
+    assert_eq!(entry.serving_models, vec!["signed-model".to_string()]);
+    assert_eq!(entry.latency_ms, Some(42), "the relay's hop view is kept");
+    assert_eq!(
+        serving_models(&node, 0x61).await,
+        Some(vec!["signed-model".to_string()])
+    );
+    assert_eq!(
+        cache_epoch(&node, 0x61).await,
+        Some(3),
+        "unsigned cache affinity still rides on the record-derived entry"
+    );
+}
+
+#[tokio::test]
+async fn older_relayed_record_does_not_let_its_unsigned_twin_override() {
+    let node = Node::new_for_tests(NodeRole::Worker).await.unwrap();
+    receive(
+        &node,
+        0x62,
+        Vec::new(),
+        vec![signed_worker_record(0x61, 5, "newer-model")],
+    )
+    .await;
+
+    receive(
+        &node,
+        0x63,
+        vec![unsigned_worker(0x61, "relay-view-model")],
+        vec![signed_worker_record(0x61, 4, "older-model")],
+    )
+    .await;
+
+    assert_eq!(
+        serving_models(&node, 0x61).await,
+        Some(vec!["newer-model".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn forged_record_does_not_let_its_unsigned_twin_override_a_held_record() {
+    let node = Node::new_for_tests(NodeRole::Worker).await.unwrap();
+    receive(
+        &node,
+        0x62,
+        Vec::new(),
+        vec![signed_worker_record(0x61, 1, "signed-model")],
+    )
+    .await;
+    let mut forged = signed_worker_record(0x61, 2, "forged-model");
+    let last = forged.signed.len() - 1;
+    forged.signed[last] ^= 0x01;
+
+    receive(
+        &node,
+        0x63,
+        vec![unsigned_worker(0x61, "relay-view-model")],
+        vec![forged],
+    )
+    .await;
+
+    assert_eq!(
+        serving_models(&node, 0x61).await,
+        Some(vec!["signed-model".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn exhausted_verification_budget_does_not_let_an_unsigned_twin_override() {
+    let node = Node::new_for_tests(NodeRole::Worker).await.unwrap();
+    receive(
+        &node,
+        0x62,
+        Vec::new(),
+        vec![signed_worker_record(0x61, 1, "signed-model")],
+    )
+    .await;
+
+    receive(
+        &node,
+        0x63,
+        vec![unsigned_worker(0x61, "relay-view-model")],
+        vec![signed_worker_record(0x61, 2, "unverified-model"); 4097],
+    )
+    .await;
+
+    assert_eq!(
+        serving_models(&node, 0x61).await,
+        Some(vec!["signed-model".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn repeated_unsigned_entries_yield_one_record_derived_entry() {
+    let node = Node::new_for_tests(NodeRole::Worker).await.unwrap();
+    receive(
+        &node,
+        0x62,
+        Vec::new(),
+        vec![signed_worker_record(0x61, 1, "signed-model")],
+    )
+    .await;
+    let mut first = unsigned_worker(0x61, "first-claim");
+    first.1.latency_ms = Some(11);
+    let mut second = unsigned_worker(0x61, "second-claim");
+    second.1.latency_ms = Some(22);
+
+    let resolved = receive(&node, 0x63, vec![first, second], Vec::new()).await;
+
+    let entries: Vec<_> = resolved
+        .iter()
+        .filter(|(addr, _)| addr.id == test_endpoint_id(0x61))
+        .map(|(_, ann)| ann)
+        .collect();
+    let [entry] = entries.as_slice() else {
+        panic!("expected one entry for the node, got {}", entries.len());
+    };
+    assert_eq!(entry.serving_models, vec!["signed-model".to_string()]);
+    assert_eq!(entry.latency_ms, Some(11));
+}
+
+#[tokio::test]
+async fn unsigned_entry_applies_once_the_held_record_is_expired() {
+    let node = Node::new_for_tests(NodeRole::Worker).await.unwrap();
+    // A node may send its own expired record over its own connection; we
+    // hold it, but relays may not forward it and it does not outrank them.
+    let issued_at = current_time_unix_ms() - NODE_RECORD.max_age_ms - 60_000;
+    receive(
+        &node,
+        0x61,
+        Vec::new(),
+        vec![signed_worker_record_at(0x61, 1, "expired-model", issued_at)],
+    )
+    .await;
+    assert!(
+        node.state
+            .lock()
+            .await
+            .node_records
+            .contains(&test_endpoint_id(0x61))
+    );
+
     let resolved = receive(
         &node,
         0x63,
@@ -275,11 +435,13 @@ async fn unsigned_announcements_from_older_relays_still_apply() {
     )
     .await;
 
-    assert!(ids(&resolved).contains(&test_endpoint_id(0x61)));
-    assert_eq!(
-        serving_models(&node, 0x61).await,
-        Some(vec!["unsigned-model".to_string()])
-    );
+    // The peer table keeps the direct sender's own state, so check what the
+    // merge hands to it.
+    let (_, entry) = resolved
+        .iter()
+        .find(|(addr, _)| addr.id == test_endpoint_id(0x61))
+        .expect("the relay's entry is kept");
+    assert_eq!(entry.serving_models, vec!["unsigned-model".to_string()]);
 }
 
 #[tokio::test]

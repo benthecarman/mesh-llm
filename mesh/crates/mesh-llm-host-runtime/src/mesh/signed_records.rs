@@ -10,8 +10,8 @@
 use super::{Node, PeerAnnouncement};
 use crate::mesh::requirements::current_time_unix_ms;
 use crate::proto::node::{
-    CacheAffinityAdvertisement as WireCacheAffinity, NodeRecord, SignedCacheAffinity,
-    SignedNodeRecord,
+    CacheAffinityAdvertisement as WireCacheAffinity, HopObservation, NodeRecord,
+    SignedCacheAffinity, SignedNodeRecord,
 };
 use crate::protocol::node_record::{
     hop_observation_from_ann, node_record_from_wire_ann, node_record_to_local,
@@ -121,7 +121,7 @@ impl Node {
         let verification_completed = prepared.is_some();
         let prepared = prepared.unwrap_or_default();
         let local_id = self.endpoint.id();
-        let (mut node_records, cache_affinity) = {
+        let (mut node_records, cache_affinity, held_twins) = {
             let mut state = self.state.lock().await;
             let now = current_time_unix_ms();
             let node_records = admit_node_records(
@@ -147,8 +147,22 @@ impl Node {
             if !strict && verification_completed && !prepared.sender_cache_record_present {
                 state.cache_affinity_records.remove(&remote);
             }
-            (node_records, cache_affinity)
+            let held_twins = if strict {
+                HashMap::new()
+            } else {
+                held_records_for_unsigned(
+                    &state.node_records,
+                    remote,
+                    &inbound.announcements,
+                    &node_records.replacements,
+                    now,
+                )
+            };
+            (node_records, cache_affinity, held_twins)
         };
+        let relayed_records_applied = node_records.replacements.len();
+        let held_records_applied =
+            apply_held_records(remote, held_twins, &mut node_records.replacements);
         let unsigned_received = inbound.announcements.len();
         let mut announcements = merge_unsigned(
             remote,
@@ -157,13 +171,13 @@ impl Node {
             &mut node_records.replacements,
         );
         let unsigned_applied = announcements.len();
-        let relayed_records_applied = node_records.replacements.len();
         announcements.extend(node_records.replacements.into_values());
         apply_signed_cache_affinity(&mut announcements, &cache_affinity.advertisements);
         tracing::debug!(
             sender = %remote.fmt_short(),
             records = record_count,
             relayed_records_applied,
+            held_records_applied,
             cache_affinity_records = cache_count,
             cache_affinity_applied = cache_affinity.advertisements.len(),
             unsigned_received,
@@ -192,9 +206,10 @@ fn cache_affinity_wire(record: &VerifiedRecord) -> SignedCacheAffinity {
     }
 }
 
-/// Keeps each unsigned entry unless an accepted record replaces it. A
-/// replaced entry still lends its cache affinity to the record-derived
-/// announcement, for senders that do not sign cache affinity.
+/// Keeps each unsigned entry unless a signed record replaces it: one accepted
+/// from this frame, or a fresh one already held. A replaced entry still lends
+/// its cache affinity to the record-derived announcement, for senders that do
+/// not sign cache affinity.
 fn merge_unsigned(
     remote: EndpointId,
     strict: bool,
@@ -214,6 +229,52 @@ fn merge_unsigned(
         }
     }
     kept
+}
+
+/// Fresh node records already held for third parties that this frame
+/// describes only with unsigned entries. A relay that leaves out, or sends an
+/// older copy of, a record we hold does not get to replace the node's own
+/// description with its claim. Each record keeps the relay's hop view from the
+/// first unsigned entry for that node, as if the relay had attached the record.
+fn held_records_for_unsigned(
+    held: &HeldRecords,
+    remote: EndpointId,
+    unsigned: &[Announcement],
+    replacements: &HashMap<EndpointId, Announcement>,
+    now: u64,
+) -> HashMap<EndpointId, (VerifiedRecord, HopObservation)> {
+    let mut twins = HashMap::new();
+    for (addr, ann) in unsigned {
+        let id = addr.id;
+        if id == remote || replacements.contains_key(&id) || twins.contains_key(&id) {
+            continue;
+        }
+        if let Some(record) = held.fresh(&id, now) {
+            twins.insert(id, (record.clone(), hop_observation_from_ann(ann)));
+        }
+    }
+    twins
+}
+
+/// Rebuilds announcements from held records outside the membership lock.
+/// A record that no longer converts leaves the unsigned entry in place, as
+/// an unconvertible record in the frame would.
+fn apply_held_records(
+    remote: EndpointId,
+    held: HashMap<EndpointId, (VerifiedRecord, HopObservation)>,
+    replacements: &mut HashMap<EndpointId, Announcement>,
+) -> usize {
+    let mut applied = 0;
+    for (id, (record, hop)) in held {
+        let entry = decode_node_record(record.body())
+            .ok()
+            .and_then(|body| relayed_record_announcement(remote, id, &body, Some(&hop)));
+        if let Some(entry) = entry {
+            replacements.insert(id, entry);
+            applied += 1;
+        }
+    }
+    applied
 }
 
 /// Signed cache affinity replaces whatever unsigned copy an announcement
