@@ -233,19 +233,8 @@ pub fn plan_balanced_accepted_contiguous(
         })
         .collect::<Vec<_>>();
 
-    let split_count = stage_count - 1;
-    let mut best: Option<(u128, Vec<u32>)> = None;
-    choose_balanced_splits(
-        &accepted,
-        split_count,
-        0,
-        &mut Vec::with_capacity(split_count),
-        layer_start,
-        layer_end,
-        stage_count,
-        &mut best,
-    );
-    let Some((_, splits)) = best else {
+    let Some(splits) = choose_balanced_splits(&accepted, layer_start, layer_end, stage_count)
+    else {
         return Err(PlanError::NoAcceptedBalancedSplit {
             stages: stage_count,
         });
@@ -263,60 +252,98 @@ pub fn plan_balanced_accepted_contiguous(
     Ok(plan)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Chooses `stage_count - 1` ascending boundaries from `accepted` that are
+/// nearest to an even partition of `layer_start..layer_end`.
+///
+/// The score is the summed distance of each boundary from its even-partition
+/// ideal; ties go to the lexicographically smallest boundary set. Because the
+/// score is a sum of independent per-position terms, a suffix dynamic program
+/// finds the optimum in `O(split_count * accepted.len())` instead of
+/// enumerating every combination of accepted boundaries.
+///
+/// `accepted` must be strictly ascending and lie inside the layer range.
+/// Returns `None` when fewer than two stages are requested or `accepted` has
+/// too few boundaries.
 fn choose_balanced_splits(
     accepted: &[u32],
-    remaining: usize,
-    next_index: usize,
-    selected: &mut Vec<u32>,
     layer_start: u32,
     layer_end: u32,
     stage_count: usize,
-    best: &mut Option<(u128, Vec<u32>)>,
-) {
-    if remaining == 0 {
-        let span = u128::from(layer_end - layer_start);
-        let score = selected
-            .iter()
-            .enumerate()
-            .map(|(index, boundary)| {
-                let actual = u128::from(*boundary - layer_start) * stage_count as u128;
-                let ideal = span * (index + 1) as u128;
-                actual.abs_diff(ideal)
-            })
-            .sum();
-        let replace = match best.as_ref() {
-            None => true,
-            Some((best_score, best_splits)) => {
-                score < *best_score
-                    || (score == *best_score && selected.as_slice() < best_splits.as_slice())
+) -> Option<Vec<u32>> {
+    let split_count = stage_count.checked_sub(1)?;
+    if split_count == 0 || accepted.len() < split_count {
+        return None;
+    }
+    let cost = BalancedSplitCost {
+        layer_start,
+        span: u128::from(layer_end - layer_start),
+        stage_count: stage_count as u128,
+    };
+    let best_from = balanced_suffix_costs(accepted, split_count, &cost);
+    reconstruct_balanced_splits(accepted, &best_from, &cost)
+}
+
+struct BalancedSplitCost {
+    layer_start: u32,
+    span: u128,
+    stage_count: u128,
+}
+
+impl BalancedSplitCost {
+    /// Distance of `boundary`, used as split `position`, from its even ideal,
+    /// scaled by `stage_count` to stay in integers.
+    fn at(&self, position: usize, boundary: u32) -> u128 {
+        let actual = u128::from(boundary - self.layer_start) * self.stage_count;
+        let ideal = self.span * (position as u128 + 1);
+        actual.abs_diff(ideal)
+    }
+}
+
+/// `best_from[position][index]` is the minimum cost of splits
+/// `position..split_count` when split `position` is `accepted[index]`, or
+/// `None` when too few accepted boundaries follow `index`.
+fn balanced_suffix_costs(
+    accepted: &[u32],
+    split_count: usize,
+    cost: &BalancedSplitCost,
+) -> Vec<Vec<Option<u128>>> {
+    let mut best_from = vec![vec![None; accepted.len()]; split_count];
+    for position in (0..split_count).rev() {
+        let is_last = position + 1 == split_count;
+        // Minimum of the next row over indexes strictly after `index`.
+        let mut later_min: Option<u128> = None;
+        for index in (0..accepted.len()).rev() {
+            let tail = if is_last { Some(0) } else { later_min };
+            best_from[position][index] = tail.map(|tail| tail + cost.at(position, accepted[index]));
+            if !is_last {
+                later_min = later_min
+                    .into_iter()
+                    .chain(best_from[position + 1][index])
+                    .min();
             }
-        };
-        if replace {
-            *best = Some((score, selected.clone()));
         }
-        return;
     }
+    best_from
+}
 
-    if accepted.len().saturating_sub(next_index) < remaining {
-        return;
+/// Walks the suffix costs front to back, taking the smallest boundary that
+/// still completes an optimal split set. That yields the lexicographically
+/// smallest optimum.
+fn reconstruct_balanced_splits(
+    accepted: &[u32],
+    best_from: &[Vec<Option<u128>>],
+    cost: &BalancedSplitCost,
+) -> Option<Vec<u32>> {
+    let mut remaining = best_from.first()?.iter().flatten().min().copied()?;
+    let mut splits = Vec::with_capacity(best_from.len());
+    let mut start = 0;
+    for (position, row) in best_from.iter().enumerate() {
+        let index = (start..accepted.len()).find(|&index| row[index] == Some(remaining))?;
+        splits.push(accepted[index]);
+        remaining -= cost.at(position, accepted[index]);
+        start = index + 1;
     }
-
-    let last_start = accepted.len().saturating_sub(remaining);
-    for index in next_index..=last_start {
-        selected.push(accepted[index]);
-        choose_balanced_splits(
-            accepted,
-            remaining - 1,
-            index + 1,
-            selected,
-            layer_start,
-            layer_end,
-            stage_count,
-            best,
-        );
-        selected.pop();
-    }
+    Some(splits)
 }
 
 fn plan_ranges(
@@ -731,4 +758,108 @@ fn diagnostics_for(
     }
 
     diagnostics
+}
+
+#[cfg(test)]
+mod balanced_split_tests {
+    use super::*;
+
+    /// The exhaustive search the dynamic program replaced: every ascending
+    /// combination, lowest score first, then the lexicographically smallest.
+    fn exhaustive_balanced_splits(
+        accepted: &[u32],
+        layer_start: u32,
+        layer_end: u32,
+        stage_count: usize,
+    ) -> Option<Vec<u32>> {
+        // The score is restated here instead of reusing `BalancedSplitCost`,
+        // so a mistake in that formula cannot hide on both sides.
+        let span = u128::from(layer_end - layer_start);
+        let score_at = |position: usize, boundary: u32| {
+            let actual = u128::from(boundary - layer_start) * stage_count as u128;
+            let ideal = span * (position + 1) as u128;
+            actual.abs_diff(ideal)
+        };
+        let split_count = stage_count - 1;
+        (0u32..1 << accepted.len())
+            .filter(|mask| mask.count_ones() as usize == split_count)
+            .map(|mask| {
+                let splits = (0..accepted.len())
+                    .filter(|index| mask & (1 << index) != 0)
+                    .map(|index| accepted[index])
+                    .collect::<Vec<_>>();
+                let score = splits
+                    .iter()
+                    .enumerate()
+                    .map(|(position, boundary)| score_at(position, *boundary))
+                    .sum::<u128>();
+                (score, splits)
+            })
+            .min()
+            .map(|(_, splits)| splits)
+    }
+
+    #[test]
+    fn matches_exhaustive_search_on_every_small_accepted_set() {
+        let layer_start = 3;
+        let layer_end = 14;
+        let candidates = (layer_start + 1..layer_end).collect::<Vec<_>>();
+        for mask in 0u32..1 << candidates.len() {
+            let accepted = candidates
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| mask & (1 << index) != 0)
+                .map(|(_, boundary)| *boundary)
+                .collect::<Vec<_>>();
+            for stage_count in 2..=6 {
+                assert_eq!(
+                    choose_balanced_splits(&accepted, layer_start, layer_end, stage_count),
+                    exhaustive_balanced_splits(&accepted, layer_start, layer_end, stage_count),
+                    "accepted {accepted:?}, {stage_count} stages"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn matches_exhaustive_search_on_sparse_boundaries_over_wide_ranges() {
+        // Deterministic xorshift so failures reproduce.
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        for _ in 0..400 {
+            let layer_start = next(1_000) as u32;
+            let layer_end = layer_start + 20 + next(4_096) as u32;
+            let wanted = next(15) as usize;
+            let mut accepted = std::collections::BTreeSet::new();
+            while accepted.len() < wanted {
+                accepted
+                    .insert(layer_start + 1 + next(u64::from(layer_end - layer_start - 1)) as u32);
+            }
+            let accepted = accepted.into_iter().collect::<Vec<_>>();
+            let stage_count = 2 + next(8) as usize;
+            assert_eq!(
+                choose_balanced_splits(&accepted, layer_start, layer_end, stage_count),
+                exhaustive_balanced_splits(&accepted, layer_start, layer_end, stage_count),
+                "accepted {accepted:?} over {layer_start}..{layer_end}, {stage_count} stages"
+            );
+        }
+    }
+
+    #[test]
+    fn breaks_score_ties_toward_earlier_boundaries() {
+        // Ideal boundary for 2 stages over 0..10 is 5; 4 and 6 tie.
+        assert_eq!(choose_balanced_splits(&[4, 6], 0, 10, 2), Some(vec![4]));
+    }
+
+    #[test]
+    fn rejects_too_few_accepted_boundaries() {
+        assert_eq!(choose_balanced_splits(&[4, 6], 0, 10, 4), None);
+        assert_eq!(choose_balanced_splits(&[], 0, 10, 2), None);
+        assert_eq!(choose_balanced_splits(&[4], 0, 10, 1), None);
+    }
 }

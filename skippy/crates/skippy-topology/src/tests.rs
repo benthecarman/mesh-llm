@@ -839,6 +839,28 @@ fn balanced_planner_uses_generic_boundaries_without_family_policy() {
 }
 
 #[test]
+fn balanced_planner_handles_many_stages_over_many_layers() {
+    // An exhaustive search would visit C(127, 15) split sets here.
+    let request = TopologyPlanRequest {
+        topology_id: "generic-balanced-wide".to_string(),
+        model_id: "unknown-family".to_string(),
+        layers: dense_attention_layers(128, 10),
+        nodes: nodes(16),
+        family: None,
+        policy: PlannerPolicy::default(),
+    };
+
+    let plan = plan_balanced_accepted_contiguous(&request, 16).expect("sixteen-stage plan");
+    assert_eq!(
+        plan.boundaries
+            .iter()
+            .map(|boundary| boundary.layer_boundary)
+            .collect::<Vec<_>>(),
+        (1..16).map(|stage| stage * 8).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn gemma3n_requires_altup_sideband_and_constrained_kv_boundary() {
     let request = TopologyPlanRequest {
         topology_id: "gemma3n".to_string(),
