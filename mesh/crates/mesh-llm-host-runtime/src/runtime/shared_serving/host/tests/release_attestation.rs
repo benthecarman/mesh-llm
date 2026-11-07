@@ -124,7 +124,7 @@ fn load_fixture(directory: &std::path::Path, bytes: &[u8]) -> LoadedReleaseAttes
 
 #[tokio::test]
 /// Prove certified admission, model discovery and reconnect with the same endpoint identity.
-async fn shared_attachment_joins_certified_mesh_with_verified_binary_proof() {
+async fn shared_attachment_joins_certified_mesh_with_policy_trusted_binary_proof() {
     let fixture = CertifiedMesh::new().await;
     let attachment = fixture.attach(Ok(fixture.proof.clone())).await;
     let attachment = attachment.expect("certified shared attachment must pass QUIC admission");
@@ -137,10 +137,16 @@ async fn shared_attachment_joins_certified_mesh_with_verified_binary_proof() {
         .find(|peer| peer.id == endpoint)
         .expect("certified attachment is admitted by the seed");
     assert!(peer.admitted);
-    assert!(peer.release_attestation_summary.verified);
+    // The mesh policy's signer list admits the peer; the status summaries
+    // use the node's own trust store, which configures no signers here.
+    assert_eq!(
+        peer.release_attestation_summary.status,
+        crate::ReleaseAttestationStatus::SignedUntrusted
+    );
+    assert!(!peer.release_attestation_summary.verified);
     assert_eq!(
         attachment.node.release_attestation_summary().await.status,
-        crate::ReleaseAttestationStatus::Valid
+        crate::ReleaseAttestationStatus::SignedUntrusted
     );
     attachment.advertise(true).await;
     let (mut send, mut recv) = fixture.seed.open_http_tunnel(endpoint).await.unwrap();
@@ -159,7 +165,10 @@ async fn shared_attachment_joins_certified_mesh_with_verified_binary_proof() {
 
     let reattached = fixture.attach(Ok(fixture.proof.clone())).await.unwrap();
     assert_eq!(reattached.node.id(), endpoint);
-    assert!(reattached.node.release_attestation_summary().await.verified);
+    assert_eq!(
+        reattached.node.release_attestation_summary().await.status,
+        crate::ReleaseAttestationStatus::SignedUntrusted
+    );
     reattached.close().await;
     fixture.close().await;
 }
@@ -177,18 +186,19 @@ async fn shared_attachment_rejects_missing_tampered_and_untrusted_binary_proofs(
         (tampered, crate::ReleaseAttestationStatus::Invalid),
         (
             stamped_binary_bytes(&test_release_signing_key(9)),
-            crate::ReleaseAttestationStatus::Valid,
+            crate::ReleaseAttestationStatus::SignedUntrusted,
         ),
     ];
     for (bytes, expected_status) in candidates {
         let fixture = CertifiedMesh::new().await;
         let proof = load_fixture(fixture.directory.path(), &bytes);
         assert_eq!(proof.summary.status, expected_status);
-        let expected_rejection = if expected_status == crate::ReleaseAttestationStatus::Valid {
-            crate::MeshRequirementRejectReason::ReleaseSignerUntrusted
-        } else {
-            crate::MeshRequirementRejectReason::CertifiedBinaryRequired
-        };
+        let expected_rejection =
+            if expected_status == crate::ReleaseAttestationStatus::SignedUntrusted {
+                crate::MeshRequirementRejectReason::ReleaseSignerUntrusted
+            } else {
+                crate::MeshRequirementRejectReason::CertifiedBinaryRequired
+            };
         let result = fixture.attach(Ok(proof)).await;
         assert!(result.is_err(), "uncertified binary must not join");
         let error = result.err().unwrap();

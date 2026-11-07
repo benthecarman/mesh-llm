@@ -39,7 +39,8 @@ pub(super) async fn attach_to_node(
         .await;
 }
 
-/// Log whether a binary's proof is missing, invalid or successfully verified.
+/// Log whether a binary's proof is missing, invalid, or correctly signed and
+/// whether a configured signer vouches for it.
 fn log_loaded_attestation(loaded: &LoadedReleaseAttestation) {
     match loaded.summary.status {
         crate::ReleaseAttestationStatus::Missing => tracing::info!(
@@ -51,12 +52,13 @@ fn log_loaded_attestation(loaded: &LoadedReleaseAttestation) {
             error = %loaded.summary.error.as_deref().unwrap_or("unknown release attestation error"),
             "local binary has an invalid embedded release attestation; continuing without advertising one"
         ),
-        crate::ReleaseAttestationStatus::Valid => log_verified_attestation(loaded),
+        crate::ReleaseAttestationStatus::Valid
+        | crate::ReleaseAttestationStatus::SignedUntrusted => log_signed_attestation(loaded),
     }
 }
 
-/// Log verified signer and proof identity, warning if the expected payload is absent.
-fn log_verified_attestation(loaded: &LoadedReleaseAttestation) {
+/// Log signer and proof identity, warning if the expected payload is absent.
+fn log_signed_attestation(loaded: &LoadedReleaseAttestation) {
     let Some(attestation) = &loaded.attestation else {
         tracing::warn!(
             path = %loaded.binary_path.display(),
@@ -64,15 +66,14 @@ fn log_verified_attestation(loaded: &LoadedReleaseAttestation) {
         );
         return;
     };
-    if loaded.summary.verified {
-        let attestation_hash = attestation.canonical_hash_hex().ok();
-        tracing::info!(
-            path = %loaded.binary_path.display(),
-            signer_key_id = %attestation.signer_key_id,
-            attestation_hash = attestation_hash.as_deref().unwrap_or("unknown"),
-            "loaded local embedded release attestation"
-        );
-    }
+    let attestation_hash = attestation.canonical_hash_hex().ok();
+    tracing::info!(
+        path = %loaded.binary_path.display(),
+        signer_key_id = %attestation.signer_key_id,
+        signer_trusted = loaded.summary.verified,
+        attestation_hash = attestation_hash.as_deref().unwrap_or("unknown"),
+        "loaded local embedded release attestation"
+    );
 }
 
 #[cfg(test)]
@@ -139,7 +140,10 @@ mod tests {
         let loaded = load_for_binary_path(&binary_path, &ReleaseSignerTrustStore::default())
             .expect("load release attestation");
 
-        assert_eq!(loaded.summary.status, ReleaseAttestationStatus::Valid);
+        assert_eq!(
+            loaded.summary.status,
+            ReleaseAttestationStatus::SignedUntrusted
+        );
         loaded
             .attestation
             .expect("embedded attestation")

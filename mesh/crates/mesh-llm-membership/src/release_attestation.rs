@@ -78,7 +78,11 @@ impl Default for ReleaseSignerTrustStore {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ReleaseAttestationStatus {
+    /// Correctly signed by a signer in the configured trust store.
     Valid,
+    /// Correctly signed, but no release signers are configured, so nothing
+    /// vouches for the signer: any key can produce this status.
+    SignedUntrusted,
     #[default]
     Missing,
     Invalid,
@@ -109,6 +113,7 @@ pub struct ReleaseAttestationSummary {
     pub supported_protocol_generation_max: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// True only when a configured release signer matched (`status == Valid`).
     pub verified: bool,
 }
 
@@ -512,6 +517,28 @@ impl ReleaseSignerTrustStore {
         self.trusted_signers
             .sort_by(|a, b| a.signer_key_id.cmp(&b.signer_key_id));
     }
+
+    /// Classify a correctly signed attestation from `signer_key_id`: `Valid`
+    /// when the signer is configured, `SignedUntrusted` when no signers are,
+    /// and an error when other signers are configured.
+    pub fn status_for_signer(
+        &self,
+        signer_key_id: &str,
+    ) -> Result<ReleaseAttestationStatus, ReleaseAttestationError> {
+        if self.trusted_signers.is_empty() {
+            return Ok(ReleaseAttestationStatus::SignedUntrusted);
+        }
+        let signer_key_id = signer_key_id.trim();
+        if self
+            .trusted_signers
+            .iter()
+            .any(|entry| entry.signer_key_id.trim() == signer_key_id)
+        {
+            Ok(ReleaseAttestationStatus::Valid)
+        } else {
+            Err(ReleaseAttestationError::UntrustedSigner)
+        }
+    }
 }
 
 pub fn verify_release_attestation(
@@ -537,17 +564,13 @@ pub fn verify_release_attestation(
         summary.error = Some(error.to_string());
         return summary;
     }
-    if !trust_store.trusted_signers.is_empty()
-        && !trust_store
-            .trusted_signers
-            .iter()
-            .any(|entry| entry.signer_key_id == attestation.signer_key_id)
-    {
-        summary.error = Some(ReleaseAttestationError::UntrustedSigner.to_string());
-        return summary;
+    match trust_store.status_for_signer(&attestation.signer_key_id) {
+        Ok(status) => {
+            summary.verified = status == ReleaseAttestationStatus::Valid;
+            summary.status = status;
+        }
+        Err(error) => summary.error = Some(error.to_string()),
     }
-    summary.status = ReleaseAttestationStatus::Valid;
-    summary.verified = true;
     summary
 }
 
@@ -630,6 +653,67 @@ pub(crate) mod tests {
             summary.signer_key_id.as_deref(),
             Some(signer_key_id.as_str())
         );
+    }
+
+    #[test]
+    fn release_attestation_without_configured_signers_is_signed_untrusted() {
+        let signing_key = test_release_signing_key(7);
+        let signer_key_id = release_signer_key_id(&signing_key.verifying_key());
+        let attestation = signed_canonical_attestation(&signing_key);
+
+        let summary =
+            verify_release_attestation(Some(&attestation), &ReleaseSignerTrustStore::default());
+
+        assert_eq!(summary.status, ReleaseAttestationStatus::SignedUntrusted);
+        assert!(!summary.verified);
+        assert_eq!(summary.error, None);
+        assert_eq!(
+            summary.signer_key_id.as_deref(),
+            Some(signer_key_id.as_str())
+        );
+        assert_eq!(
+            serde_json::to_value(&summary.status).expect("status json"),
+            serde_json::json!("signed_untrusted")
+        );
+    }
+
+    #[test]
+    fn trust_store_classifies_signers() {
+        let signer_key_id = release_signer_key_id(&test_release_signing_key(7).verifying_key());
+        let other_key_id = release_signer_key_id(&test_release_signing_key(8).verifying_key());
+        let empty = ReleaseSignerTrustStore::default();
+        let configured = ReleaseSignerTrustStore::default()
+            .merged_with_trusted_signers(std::slice::from_ref(&signer_key_id));
+
+        assert_eq!(
+            empty.status_for_signer(&signer_key_id),
+            Ok(ReleaseAttestationStatus::SignedUntrusted)
+        );
+        assert_eq!(
+            configured.status_for_signer(&signer_key_id),
+            Ok(ReleaseAttestationStatus::Valid)
+        );
+        assert_eq!(
+            configured.status_for_signer(&format!(" {signer_key_id}\n")),
+            Ok(ReleaseAttestationStatus::Valid)
+        );
+        assert_eq!(
+            configured.status_for_signer(&other_key_id),
+            Err(ReleaseAttestationError::UntrustedSigner)
+        );
+    }
+
+    #[test]
+    fn release_attestation_with_bad_signature_is_invalid_without_configured_signers() {
+        let signing_key = test_release_signing_key(7);
+        let mut attestation = signed_canonical_attestation(&signing_key);
+        attestation.build_id = "tampered-build".into();
+
+        let summary =
+            verify_release_attestation(Some(&attestation), &ReleaseSignerTrustStore::default());
+
+        assert_eq!(summary.status, ReleaseAttestationStatus::Invalid);
+        assert!(!summary.verified);
     }
 
     #[test]

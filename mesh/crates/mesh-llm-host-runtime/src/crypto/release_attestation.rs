@@ -95,25 +95,15 @@ impl EmbeddedReleasePayloadVerifier for EmbeddedReleasePayloadCapture<'_> {
         {
             return Err(ReleaseAttestationError::Expired);
         }
-        if !self.trust_store.trusted_signers.is_empty()
-            && !self
-                .trust_store
-                .trusted_signers
-                .iter()
-                .any(|entry| entry.signer_key_id == embedded.signer_key_id)
-        {
-            return Err(ReleaseAttestationError::UntrustedSigner);
-        }
+        let status = self
+            .trust_store
+            .status_for_signer(&embedded.signer_key_id)?;
         let signature = embedded.signature_bytes()?.to_vec();
         let attestation = claims
             .clone()
             .into_release_build_attestation(embedded.signer_key_id.clone(), signature);
-        let summary = claims.summary(
-            embedded.signer_key_id,
-            ReleaseAttestationStatus::Valid,
-            true,
-            None,
-        );
+        let verified = status == ReleaseAttestationStatus::Valid;
+        let summary = claims.summary(embedded.signer_key_id, status, verified, None);
         self.verified
             .replace(Some(VerifiedEmbeddedReleaseAttestation {
                 attestation,
@@ -266,7 +256,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn embedded_release_attestation_loader_reports_valid_summary() {
+    fn embedded_release_attestation_loader_reports_signed_untrusted_without_signers() {
         let dir = tempfile::tempdir().expect("tempdir");
         let binary_path = dir.path().join("mesh-llm");
         let signing_key = test_release_signing_key(8);
@@ -278,12 +268,50 @@ pub(crate) mod tests {
         )
         .expect("load embedded attestation");
 
-        assert_eq!(loaded.summary.status, ReleaseAttestationStatus::Valid);
-        assert!(loaded.summary.verified);
+        assert_eq!(
+            loaded.summary.status,
+            ReleaseAttestationStatus::SignedUntrusted
+        );
+        assert!(!loaded.summary.verified);
         let attestation = loaded.attestation.expect("embedded attestation");
         attestation
             .verify()
             .expect("embedded attestation should verify as canonical protocol attestation");
+    }
+
+    #[test]
+    fn embedded_release_attestation_loader_checks_configured_signers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary_path = dir.path().join("mesh-llm");
+        let signing_key = test_release_signing_key(8);
+        let signer_key_id = release_signer_key_id(&signing_key.verifying_key());
+        std::fs::write(&binary_path, stamped_binary_bytes(&signing_key)).expect("write binary");
+
+        let trusted = ReleaseSignerTrustStore::default()
+            .merged_with_trusted_signers(std::slice::from_ref(&signer_key_id));
+        let loaded = load_embedded_release_attestation_for_binary(&binary_path, &trusted)
+            .expect("load embedded attestation");
+        assert_eq!(loaded.summary.status, ReleaseAttestationStatus::Valid);
+        assert!(loaded.summary.verified);
+        assert!(loaded.attestation.is_some());
+
+        let other_key_id = release_signer_key_id(&test_release_signing_key(9).verifying_key());
+        let untrusted =
+            ReleaseSignerTrustStore::default().merged_with_trusted_signers(&[other_key_id]);
+        let loaded = load_embedded_release_attestation_for_binary(&binary_path, &untrusted)
+            .expect("load embedded attestation");
+        assert_eq!(loaded.summary.status, ReleaseAttestationStatus::Invalid);
+        assert!(!loaded.summary.verified);
+        assert!(loaded.attestation.is_none());
+        assert!(
+            loaded
+                .summary
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("not trusted")),
+            "{:?}",
+            loaded.summary.error
+        );
     }
 
     #[test]
@@ -336,7 +364,10 @@ pub(crate) mod tests {
         );
 
         let valid = load(&stamped);
-        assert_eq!(valid.summary.status, ReleaseAttestationStatus::Valid);
+        assert_eq!(
+            valid.summary.status,
+            ReleaseAttestationStatus::SignedUntrusted
+        );
         assert_eq!(
             read_release_footer_bytes(&binary_path).expect("read"),
             stamped

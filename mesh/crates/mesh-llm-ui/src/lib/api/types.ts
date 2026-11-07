@@ -96,7 +96,7 @@ export enum LatencySource {
   UNKNOWN = 'unknown'
 }
 
-export type ReleaseAttestationStatus = 'valid' | 'missing' | 'invalid'
+export type ReleaseAttestationStatus = 'valid' | 'signed_untrusted' | 'missing' | 'invalid'
 
 export interface ReleaseAttestationSummary {
   status: ReleaseAttestationStatus

@@ -58,7 +58,7 @@ export type Ownership = {
   hostname_hint?: string
 }
 
-export type ReleaseAttestationStatus = 'valid' | 'missing' | 'invalid'
+export type ReleaseAttestationStatus = 'valid' | 'signed_untrusted' | 'missing' | 'invalid'
 
 export type ReleaseAttestationSummary = {
   status: ReleaseAttestationStatus
