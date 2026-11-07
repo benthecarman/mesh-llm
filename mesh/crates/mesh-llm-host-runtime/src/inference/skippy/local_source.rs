@@ -56,6 +56,22 @@ pub(crate) fn unregister_local_source_policy(model_id: &str, runtime_profile: &s
     }
 }
 
+/// The policy recorded for one exact model profile, if any.
+///
+/// Lifecycle code reads this before it publishes a policy, so a failed start
+/// can put back the exact entry it found.
+pub(crate) fn registered_local_source_policy(
+    model_id: &str,
+    runtime_profile: &str,
+) -> Option<bool> {
+    local_source_policy_registry()
+        .lock()
+        .ok()?
+        .get(model_id)?
+        .get(runtime_profile)
+        .copied()
+}
+
 pub(crate) fn local_source_required_for_model(
     model_id: &str,
     runtime_profile: Option<&str>,

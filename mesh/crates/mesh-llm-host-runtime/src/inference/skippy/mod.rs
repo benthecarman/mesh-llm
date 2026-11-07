@@ -73,8 +73,8 @@ pub(crate) use hooks::MeshAutoHookPolicy;
 pub(crate) use local_source::local_source_required_for_model;
 pub(crate) use local_source::{
     apply_verified_local_source, effective_local_source_required, into_content_addressed_identity,
-    is_content_addressed_gguf_ref, register_local_source_policy, unregister_local_source_policy,
-    verify_registered_content_source,
+    is_content_addressed_gguf_ref, register_local_source_policy, registered_local_source_policy,
+    unregister_local_source_policy, verify_registered_content_source,
 };
 #[cfg(test)]
 pub(crate) use materialization::resolve_package_v2_stage_to_local;

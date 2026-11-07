@@ -51,6 +51,7 @@ pub(super) fn runtime_model_audit_context(
 mod configured_load;
 mod events;
 mod load;
+mod load_rollback;
 pub(crate) mod reconciliation;
 mod unload;
 

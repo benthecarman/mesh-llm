@@ -235,9 +235,9 @@ fn local_required_runtime_model_path(
 /// caller-supplied profile must never discard a configured strict-local policy.
 async fn resolve_runtime_model_source(
     ctx: &RunAutoRuntimeLoopContext<'_>,
+    source_policy: &mut super::load_rollback::LoadSourcePolicyRollback,
     spec: &str,
     config_model_id: Option<&str>,
-    profile: &str,
     model_overrides: Option<&plugin::ModelConfigEntry>,
     instance_id: &str,
     load_started: Instant,
@@ -288,7 +288,7 @@ async fn resolve_runtime_model_source(
     // Once strict identity is known, register it before the first await. The
     // serving assignment is gossiped and stage-control requests can arrive
     // while a large GGUF is still being hashed and indexed.
-    skippy::register_local_source_policy(&runtime_model_name, profile, local_source_required);
+    source_policy.publish(&runtime_model_name, local_source_required);
     Ok(ResolvedRuntimeModelSource {
         model_path,
         runtime_model_name,
@@ -470,17 +470,38 @@ async fn prepare_configured_runtime_load(
     }
 }
 
-/// Pair capacity admission failure auditing with source-policy rollback.
+/// Publish the load's source policy under its runtime name and under the ID
+/// `start_runtime_local_model` registers, and return the config model ID the
+/// launch uses. That ID differs from the runtime name when a server alias is
+/// set, so it must be published here for a failed launch to withdraw it.
+fn publish_runtime_source_policy<'a>(
+    source_policy: &mut super::load_rollback::LoadSourcePolicyRollback,
+    runtime_model_name: &str,
+    config_model_id: Option<&'a str>,
+    model_overrides: Option<&'a plugin::ModelConfigEntry>,
+    local_source_required: bool,
+) -> Option<&'a str> {
+    source_policy.publish(runtime_model_name, local_source_required);
+    let config_model_id_for_start =
+        config_model_id.or_else(|| model_overrides.map(|model| model.model.as_str()));
+    source_policy.publish(
+        config_model_id_for_start.unwrap_or(runtime_model_name),
+        local_source_required,
+    );
+    config_model_id_for_start
+}
+
+/// Audit a capacity admission failure. The load's source-policy rollback
+/// guard withdraws the policy when the error propagates.
 fn reserve_audited_runtime_capacity(
     ctx: &mut RunAutoRuntimeLoopContext<'_>,
     instance_id: &str,
     runtime_model_name: &str,
-    profile: &str,
     target: RuntimeCapacityTarget<'_>,
     model_bytes: u64,
     load_started: Instant,
 ) -> Result<RuntimeCapacityReservation> {
-    match audit_runtime_model_load_result(
+    audit_runtime_model_load_result(
         reserve_runtime_capacity_for_model(
             ctx.runtime_capacity_ledger,
             instance_id,
@@ -490,17 +511,7 @@ fn reserve_audited_runtime_capacity(
         ),
         runtime_model_audit_context(Some(runtime_model_name), instance_id),
         load_started,
-    ) {
-        Ok(reservation) => Ok(reservation),
-        Err(error) => {
-            super::unload::unregister_local_source_policy_if_unused(
-                ctx,
-                runtime_model_name,
-                profile,
-            );
-            Err(error)
-        }
-    }
+    )
 }
 
 /// Laya models pick their device from the environment; every other model keeps
@@ -570,6 +581,9 @@ pub(crate) async fn run_auto_load_runtime_model(
         runtime_model_audit_context(None, &instance_id),
         load_started,
     )?;
+    // Every source policy this load publishes goes through this guard, so a
+    // failure on any path below restores the policy state the load found.
+    let mut source_policy = super::load_rollback::LoadSourcePolicyRollback::for_load(ctx, &profile);
     let prepared = prepare_configured_runtime_load(
         ctx,
         model_overrides,
@@ -591,9 +605,9 @@ pub(crate) async fn run_auto_load_runtime_model(
         None => {
             resolve_runtime_model_source(
                 ctx,
+                &mut source_policy,
                 &spec,
                 config_model_id.as_deref(),
-                &profile,
                 model_overrides,
                 &instance_id,
                 load_started,
@@ -626,7 +640,13 @@ pub(crate) async fn run_auto_load_runtime_model(
         load_started,
     )?;
     // Configured preflight must succeed before publishing its source policy.
-    skippy::register_local_source_policy(&runtime_model_name, &profile, local_source_required);
+    let config_model_id_for_start = publish_runtime_source_policy(
+        &mut source_policy,
+        &runtime_model_name,
+        config_model_id.as_deref(),
+        model_overrides,
+        local_source_required,
+    );
     let device_override =
         resolve_runtime_device_override(sizing.compact_meta.as_ref(), device_override, pinned_gpu);
     let capacity_target = RuntimeCapacityTarget {
@@ -642,7 +662,6 @@ pub(crate) async fn run_auto_load_runtime_model(
         ctx,
         &instance_id,
         &runtime_model_name,
-        &profile,
         capacity_target,
         admission_bytes,
         load_started,
@@ -655,9 +674,7 @@ pub(crate) async fn run_auto_load_runtime_model(
         LocalRuntimeModelStartSpec {
             node: ctx.node,
             mesh_config: ctx.config,
-            config_model_id: config_model_id
-                .as_deref()
-                .or_else(|| model_overrides.map(|model| model.model.as_str())),
+            config_model_id: config_model_id_for_start,
             runtime_profile: &profile,
             model_path: &model_path,
             preindexed_split_package: prepared
@@ -699,12 +716,8 @@ pub(crate) async fn run_auto_load_runtime_model(
         Ok(result) => result,
         Err(err) => {
             drop(capacity_reservation);
-            remove_serving_assignment(ctx.node, &runtime_model_name).await;
-            super::unload::unregister_local_source_policy_if_unused(
-                ctx,
-                &runtime_model_name,
-                &profile,
-            );
+            super::load_rollback::withdraw_failed_load_serving(ctx, &runtime_model_name).await;
+            drop(source_policy);
             ctx.survey_telemetry.record_launch_failure(
                 survey::SurveyModelSpec {
                     model: &requested_model,
@@ -733,6 +746,7 @@ pub(crate) async fn run_auto_load_runtime_model(
             return Err(err);
         }
     };
+    source_policy.commit();
     Ok(finish_runtime_model_load(
         ctx,
         RuntimeModelLaunchSuccess {
