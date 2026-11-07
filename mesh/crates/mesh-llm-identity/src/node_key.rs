@@ -2,6 +2,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::CryptoError;
+use crate::private_file::{ensure_private_dir, ensure_private_file};
 
 pub const NODE_KEY_BYTES: usize = 32;
 
@@ -42,7 +43,7 @@ pub fn home_node_key_path() -> Result<PathBuf, CryptoError> {
 }
 
 pub fn load_node_key_bytes_from_path(path: &Path) -> Result<[u8; NODE_KEY_BYTES], CryptoError> {
-    ensure_private_node_key_file(path)?;
+    ensure_private_file(path, "node key")?;
 
     let hex = std::fs::read_to_string(path)?;
     let bytes = hex::decode(hex.trim()).map_err(|err| CryptoError::InvalidKeyMaterial {
@@ -68,104 +69,12 @@ pub fn save_node_key_bytes_to_path(
             format!("node key path {} has no parent directory", path.display()),
         ))
     })?;
-    ensure_private_node_key_dir(parent)?;
+    ensure_private_dir(parent, "node key")?;
     if path.exists() {
-        ensure_private_node_key_file(path)?;
+        ensure_private_file(path, "node key")?;
     }
     write_bytes_atomically(path, hex::encode(key_bytes).as_bytes())?;
-    ensure_private_node_key_file(path)?;
-    Ok(())
-}
-
-fn ensure_private_node_key_dir(dir: &Path) -> Result<(), CryptoError> {
-    let mut missing = Vec::new();
-    let mut current = dir;
-    loop {
-        // A relative path such as `keys/node.key` bottoms out at the empty
-        // path, which is the current directory and already exists.
-        if current.as_os_str().is_empty() {
-            break;
-        }
-        match std::fs::metadata(current) {
-            Ok(metadata) => {
-                if !metadata.is_dir() {
-                    return Err(CryptoError::Io(std::io::Error::new(
-                        std::io::ErrorKind::NotADirectory,
-                        format!("node key parent {} is not a directory", current.display()),
-                    )));
-                }
-                break;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                missing.push(current);
-                current = current.parent().ok_or_else(|| {
-                    CryptoError::Io(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        format!("cannot find parent directory for {}", dir.display()),
-                    ))
-                })?;
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-
-    for path in missing.into_iter().rev() {
-        match create_private_node_key_dir(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let metadata = std::fs::metadata(path)?;
-                if !metadata.is_dir() {
-                    return Err(CryptoError::Io(std::io::Error::new(
-                        std::io::ErrorKind::NotADirectory,
-                        format!("node key parent {} is not a directory", path.display()),
-                    )));
-                }
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn create_private_node_key_dir(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-
-    let mut builder = std::fs::DirBuilder::new();
-    builder.mode(0o700).create(path)
-}
-
-#[cfg(not(unix))]
-fn create_private_node_key_dir(path: &Path) -> std::io::Result<()> {
-    std::fs::create_dir(path)
-}
-
-#[cfg(unix)]
-fn ensure_private_node_key_file(path: &Path) -> Result<(), CryptoError> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_file() {
-        return Err(CryptoError::InvalidKeyMaterial {
-            reason: format!("node key path {} is not a regular file", path.display()),
-        });
-    }
-    let mut perms = metadata.permissions();
-    if perms.mode() & 0o077 != 0 {
-        perms.set_mode(0o600);
-        std::fs::set_permissions(path, perms)?;
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn ensure_private_node_key_file(path: &Path) -> Result<(), CryptoError> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_file() {
-        return Err(CryptoError::InvalidKeyMaterial {
-            reason: format!("node key path {} is not a regular file", path.display()),
-        });
-    }
+    ensure_private_file(path, "node key")?;
     Ok(())
 }
 

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use super::{CryptoError, OwnerKeypair, owner_id_from_verifying_key};
+use crate::private_file::{ensure_private_dir, ensure_private_provisioned_file};
 
 const KEYSTORE_VERSION: u32 = 1;
 
@@ -17,6 +18,17 @@ const KEYSTORE_VERSION: u32 = 1;
 const ARGON2_M_COST: u32 = 19456; // 19 MiB
 const ARGON2_T_COST: u32 = 2;
 const ARGON2_P_COST: u32 = 1;
+
+// Ceilings on the Argon2id costs read back from a keystore file. The file
+// chooses its own costs, so without a limit a damaged or planted keystore
+// can make an unlock allocate gigabytes or run for hours. The limits leave
+// room for keystores written with much stronger costs than the defaults.
+const MAX_ARGON2_M_COST: u32 = 256 * 1024; // 256 MiB
+const MAX_ARGON2_T_COST: u32 = 10;
+const MAX_ARGON2_P_COST: u32 = 16;
+
+/// Names the owner keystore in file-placement errors.
+const KEYSTORE_FILE_LABEL: &str = "owner keystore";
 
 /// On-disk keystore format (JSON).
 #[derive(Serialize, Deserialize)]
@@ -69,24 +81,25 @@ pub fn keystore_exists(path: &Path) -> bool {
 /// Save an owner keypair to disk.
 ///
 /// If `passphrase` is `Some`, the secret keys are encrypted with Argon2id + ChaCha20Poly1305.
-/// File permissions are set to 0600 on Unix.
+/// File permissions are set to 0600 on Unix, and missing parent directories
+/// are created 0700.
 ///
 /// Returns `CryptoError::KeystoreAlreadyExists` if a keystore already exists at `path`
-/// and `overwrite` is `false`.
+/// and `overwrite` is `false`. Without `overwrite` the file is published
+/// without replacing anything, so when two writers race only one succeeds.
 pub fn save_keystore(
     path: &Path,
     keypair: &OwnerKeypair,
     passphrase: Option<&str>,
     overwrite: bool,
 ) -> Result<(), CryptoError> {
+    // Fail fast before the KDF; publication below is the authoritative check.
     if path.exists() && !overwrite {
-        return Err(CryptoError::KeystoreAlreadyExists {
-            path: path.display().to_string(),
-        });
+        return Err(keystore_already_exists(path));
     }
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        ensure_private_dir(parent, KEYSTORE_FILE_LABEL)?;
     }
 
     let keystore = if let Some(pass) = passphrase {
@@ -96,28 +109,18 @@ pub fn save_keystore(
     };
 
     let json = serde_json::to_string_pretty(&keystore)?;
-    write_keystore_bytes_atomically(path, json.as_bytes())?;
-    Ok(())
+    if overwrite {
+        write_keystore_bytes_atomically(path, json.as_bytes())
+    } else {
+        publish_keystore_bytes_without_replacing(path, json.as_bytes())
+    }
 }
 
 /// Load an owner keypair from disk.
 ///
 /// If the keystore is encrypted, `passphrase` must be provided.
 pub fn load_keystore(path: &Path, passphrase: Option<&str>) -> Result<OwnerKeypair, CryptoError> {
-    if !path.exists() {
-        return Err(CryptoError::KeystoreNotFound {
-            path: path.display().to_string(),
-        });
-    }
-
-    let raw = std::fs::read_to_string(path)?;
-    let ks: KeystoreV1 = serde_json::from_str(&raw)?;
-
-    if ks.version != KEYSTORE_VERSION {
-        return Err(CryptoError::UnsupportedVersion {
-            version: ks.version,
-        });
-    }
+    let ks = read_keystore_file(path)?;
 
     let keypair = if ks.encrypted {
         decrypt_keystore(&ks, passphrase)?
@@ -133,19 +136,7 @@ pub fn load_keystore(path: &Path, passphrase: Option<&str>) -> Result<OwnerKeypa
 
 /// Read keystore metadata without decrypting secret keys.
 pub fn keystore_metadata(path: &Path) -> Result<KeystoreInfo, CryptoError> {
-    if !path.exists() {
-        return Err(CryptoError::KeystoreNotFound {
-            path: path.display().to_string(),
-        });
-    }
-    let raw = std::fs::read_to_string(path)?;
-    let ks: KeystoreV1 = serde_json::from_str(&raw)?;
-
-    if ks.version != KEYSTORE_VERSION {
-        return Err(CryptoError::UnsupportedVersion {
-            version: ks.version,
-        });
-    }
+    let ks = read_keystore_file(path)?;
 
     let signing_public_key =
         ks.signing_public_key
@@ -206,6 +197,34 @@ pub struct KeystoreInfo {
 }
 
 // ── Internal helpers ────────────────────────────────────────────────
+
+/// Read and parse a keystore file after checking that it, or its symlink
+/// target, is a private regular file. Group or other permission bits are
+/// reset to 0600 where this process may change them.
+fn read_keystore_file(path: &Path) -> Result<KeystoreV1, CryptoError> {
+    if !path.exists() {
+        return Err(CryptoError::KeystoreNotFound {
+            path: path.display().to_string(),
+        });
+    }
+    ensure_private_provisioned_file(path, KEYSTORE_FILE_LABEL)?;
+
+    let raw = std::fs::read_to_string(path)?;
+    let ks: KeystoreV1 = serde_json::from_str(&raw)?;
+
+    if ks.version != KEYSTORE_VERSION {
+        return Err(CryptoError::UnsupportedVersion {
+            version: ks.version,
+        });
+    }
+    Ok(ks)
+}
+
+fn keystore_already_exists(path: &Path) -> CryptoError {
+    CryptoError::KeystoreAlreadyExists {
+        path: path.display().to_string(),
+    }
+}
 
 fn build_plaintext_keystore(keypair: &OwnerKeypair) -> KeystoreV1 {
     KeystoreV1 {
@@ -276,6 +295,73 @@ fn build_encrypted_keystore(
 }
 
 pub fn write_keystore_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<(), CryptoError> {
+    let (parent, tmp_path) = staging_path(path)?;
+
+    let write_result = (|| -> Result<(), CryptoError> {
+        write_new_private_file(&tmp_path, bytes)?;
+
+        // On Windows, `rename` fails if the destination already exists.
+        // Remove the destination first for Windows; on Unix the rename is atomic.
+        #[cfg(windows)]
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+
+        std::fs::rename(&tmp_path, path)?;
+        sync_parent_dir(parent)
+    })();
+
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+
+    write_result
+}
+
+/// Write `bytes` to `path` only if nothing exists there yet.
+///
+/// The bytes are staged in a private temporary file and hard-linked into
+/// place, so readers never see a partial keystore and a writer that got
+/// there first is never replaced. Filesystems without hard links (such as
+/// FAT) refuse the link; there the final file is created exclusively
+/// instead, which still never replaces a file but lets a concurrent reader
+/// see it before it is fully written.
+fn publish_keystore_bytes_without_replacing(path: &Path, bytes: &[u8]) -> Result<(), CryptoError> {
+    let (parent, tmp_path) = staging_path(path)?;
+
+    write_new_private_file(&tmp_path, bytes)?;
+    let linked = std::fs::hard_link(&tmp_path, path);
+    let _ = std::fs::remove_file(&tmp_path);
+    match linked {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(keystore_already_exists(path));
+        }
+        Err(error) if hard_links_unsupported(&error) => write_new_private_file(path, bytes)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    keystore_already_exists(path)
+                } else {
+                    error.into()
+                }
+            })?,
+        Err(error) => return Err(error.into()),
+    }
+    sync_parent_dir(parent)
+}
+
+/// Whether a failed `hard_link` means the filesystem has no hard links:
+/// `EPERM` on Linux FAT, `EOPNOTSUPP`/`ENOSYS` elsewhere.
+fn hard_links_unsupported(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::Unsupported | std::io::ErrorKind::PermissionDenied
+    )
+}
+
+/// Pick a unique temporary path next to `path`, returning it with the
+/// parent directory.
+fn staging_path(path: &Path) -> Result<(&Path, PathBuf), CryptoError> {
     let parent = path.parent().ok_or_else(|| {
         CryptoError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -294,48 +380,50 @@ pub fn write_keystore_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<(), 
         std::process::id(),
         rand::random::<u64>()
     ));
+    Ok((parent, tmp_path))
+}
 
-    let write_result = (|| -> Result<(), CryptoError> {
-        let mut options = std::fs::OpenOptions::new();
-        options.create_new(true).write(true);
+/// Create `path` exclusively with mode 0600 on Unix and write `bytes` to it
+/// durably. A file this call created is removed again if the write fails;
+/// an existing file is never touched.
+fn write_new_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
 
-            options.mode(0o600);
-        }
-
-        let mut file = options.open(&tmp_path)?;
-        file.write_all(bytes)?;
-        file.flush()?;
-        file.sync_all()?;
-        drop(file);
-
-        // On Windows, `rename` fails if the destination already exists.
-        // Remove the destination first for Windows; on Unix the rename is atomic.
-        #[cfg(windows)]
-        if path.exists() {
-            std::fs::remove_file(path)?;
-        }
-
-        std::fs::rename(&tmp_path, path)?;
-
-        // fsync the parent directory on Unix so the rename survives a crash.
-        #[cfg(unix)]
-        {
-            let dir = std::fs::File::open(parent)?;
-            dir.sync_all()?;
-        }
-
-        Ok(())
-    })();
-
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
+        options.mode(0o600);
     }
 
-    write_result
+    let mut file = options.open(path)?;
+    let written = file
+        .write_all(bytes)
+        .and_then(|()| file.flush())
+        .and_then(|()| file.sync_all());
+    drop(file);
+    if written.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    written
+}
+
+/// fsync the parent directory on Unix so a rename or link survives a crash.
+fn sync_parent_dir(parent: &Path) -> Result<(), CryptoError> {
+    #[cfg(unix)]
+    {
+        // A bare file name has an empty parent: the current directory.
+        let dir = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = parent;
+    Ok(())
 }
 
 fn plaintext_keystore(ks: &KeystoreV1) -> Result<OwnerKeypair, CryptoError> {
@@ -393,6 +481,7 @@ fn decrypt_keystore(
     let m_cost = ks.argon2_m_cost.unwrap_or(ARGON2_M_COST);
     let t_cost = ks.argon2_t_cost.unwrap_or(ARGON2_T_COST);
     let p_cost = ks.argon2_p_cost.unwrap_or(ARGON2_P_COST);
+    check_argon2_cost_ceiling(m_cost, t_cost, p_cost)?;
 
     let sym_key = derive_key(pass, &salt, m_cost, t_cost, p_cost)?;
     let key = chacha20poly1305::Key::from(*sym_key);
@@ -446,6 +535,23 @@ fn validate_keystore_metadata(ks: &KeystoreV1, keypair: &OwnerKeypair) -> Result
         }
     }
 
+    Ok(())
+}
+
+/// Refuse Argon2 costs from a keystore file that exceed the ceilings, before
+/// any memory is allocated for the KDF.
+fn check_argon2_cost_ceiling(m_cost: u32, t_cost: u32, p_cost: u32) -> Result<(), CryptoError> {
+    for (name, value, max) in [
+        ("argon2_m_cost", m_cost, MAX_ARGON2_M_COST),
+        ("argon2_t_cost", t_cost, MAX_ARGON2_T_COST),
+        ("argon2_p_cost", p_cost, MAX_ARGON2_P_COST),
+    ] {
+        if value > max {
+            return Err(CryptoError::InvalidKeyMaterial {
+                reason: format!("keystore {name} {value} exceeds the limit of {max}"),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -653,6 +759,191 @@ mod tests {
         );
 
         fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    fn set_raw_field(path: &Path, field: &str, value: serde_json::Value) {
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        raw.as_object_mut().unwrap().insert(field.into(), value);
+        fs::write(path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn encrypted_keystore_rejects_argon2_costs_above_ceiling() {
+        let path = temp_keystore_path();
+        save_keystore(&path, &OwnerKeypair::generate(), Some("secret"), false).unwrap();
+        let original = fs::read_to_string(&path).unwrap();
+
+        for (field, value) in [
+            ("argon2_m_cost", MAX_ARGON2_M_COST + 1),
+            ("argon2_t_cost", MAX_ARGON2_T_COST + 1),
+            ("argon2_p_cost", MAX_ARGON2_P_COST + 1),
+        ] {
+            fs::write(&path, &original).unwrap();
+            set_raw_field(&path, field, value.into());
+
+            let result = load_keystore(&path, Some("secret"));
+            assert!(
+                matches!(
+                    &result,
+                    Err(CryptoError::InvalidKeyMaterial { reason }) if reason.contains(field)
+                ),
+                "{field}={value} must be refused before the KDF runs, got {result:?}"
+            );
+        }
+
+        fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn concurrent_saves_without_overwrite_publish_exactly_one_keystore() {
+        let path = temp_keystore_path();
+        let writers = 8;
+        let barrier = std::sync::Barrier::new(writers);
+
+        let outcomes: Vec<(String, Result<(), CryptoError>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..writers)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let kp = OwnerKeypair::generate();
+                        barrier.wait();
+                        (kp.owner_id(), save_keystore(&path, &kp, None, false))
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        let winners: Vec<&String> = outcomes
+            .iter()
+            .filter(|(_, result)| result.is_ok())
+            .map(|(owner_id, _)| owner_id)
+            .collect();
+        assert_eq!(winners.len(), 1, "exactly one writer may publish");
+        for (_, result) in outcomes.iter().filter(|(_, result)| result.is_err()) {
+            assert!(
+                matches!(result, Err(CryptoError::KeystoreAlreadyExists { .. })),
+                "losing writers must report the existing keystore, got {result:?}"
+            );
+        }
+        assert_eq!(&load_keystore(&path, None).unwrap().owner_id(), winners[0]);
+
+        fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn publish_without_replacing_keeps_existing_file_and_cleans_up() {
+        let path = temp_keystore_path();
+        fs::write(&path, "existing").unwrap();
+
+        let result = publish_keystore_bytes_without_replacing(&path, b"new");
+
+        assert!(matches!(
+            result,
+            Err(CryptoError::KeystoreAlreadyExists { .. })
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "existing");
+        let entries = fs::read_dir(path.parent().unwrap()).unwrap().count();
+        assert_eq!(entries, 1, "the staging file must be removed");
+
+        fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_resets_group_and_other_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temp_keystore_path();
+        let kp = OwnerKeypair::generate();
+        save_keystore(&path, &kp, None, false).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        keystore_metadata(&path).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "metadata reads must tighten a readable keystore"
+        );
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        assert_eq!(
+            load_keystore(&path, None).unwrap().owner_id(),
+            kp.owner_id()
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "loads must tighten a readable keystore"
+        );
+
+        fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_keystore_loads_and_its_target_is_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Secrets managers commonly provision the keystore as a symlink.
+        let path = temp_keystore_path();
+        let kp = OwnerKeypair::generate();
+        save_keystore(&path, &kp, None, false).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let link = path.with_file_name("linked-keystore.json");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+
+        assert_eq!(
+            load_keystore(&link, None).unwrap().owner_id(),
+            kp.owner_id()
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn load_rejects_keystore_path_that_is_not_a_file() {
+        let path = temp_keystore_path();
+        fs::create_dir(&path).unwrap();
+
+        assert!(matches!(
+            load_keystore(&path, None),
+            Err(CryptoError::InvalidKeyMaterial { .. })
+        ));
+        assert!(matches!(
+            keystore_metadata(&path),
+            Err(CryptoError::InvalidKeyMaterial { .. })
+        ));
+
+        fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_creates_missing_parent_directories_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("mesh-llm-test-{}", rand::random::<u64>()));
+        let nested = root.join("nested");
+        let path = nested.join("owner-keystore.json");
+
+        save_keystore(&path, &OwnerKeypair::generate(), None, false).unwrap();
+
+        for dir in [&root, &nested] {
+            assert_eq!(
+                fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

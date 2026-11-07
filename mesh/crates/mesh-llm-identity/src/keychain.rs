@@ -169,6 +169,87 @@ pub fn load_owner_keypair_from_keychain(
     load_keystore(path, Some(pass.as_str())).map_err(OwnerKeychainLoadError::Crypto)
 }
 
+/// A keychain unlock secret copied from one keystore path to another, for a
+/// keystore file that is about to move. Keychain accounts are derived from
+/// the keystore path, so a moved keystore cannot find its secret otherwise.
+///
+/// Call [`commit`](Self::commit) after the move to remove the secret from
+/// the old path, or [`abort`](Self::abort) if the move failed to put the
+/// destination's previous entry back.
+#[must_use = "commit or abort the keychain move"]
+pub struct OwnerKeychainMove {
+    from_account: String,
+    to_account: String,
+    previous_to: Option<Zeroizing<String>>,
+}
+
+/// What [`begin_owner_keychain_move`] found for the keystore's old path.
+#[must_use = "commit or abort a started keychain move"]
+pub enum OwnerKeychainMoveStart {
+    /// The secret was copied to the new path's account.
+    Started(OwnerKeychainMove),
+    /// The backend answered and the old path has no entry.
+    NoEntry,
+    /// No keychain backend is reachable, so an entry for the old path, if
+    /// any, could not be copied. It stays under `from_account`.
+    BackendUnavailable { from_account: String },
+}
+
+/// Copy the keychain unlock secret bound to the keystore at `from` so it
+/// also unlocks that keystore at `to`.
+///
+/// Backend errors are returned so a caller can stop before it moves a
+/// keystore it could no longer unlock.
+pub fn begin_owner_keychain_move(
+    from: &Path,
+    to: &Path,
+) -> Result<OwnerKeychainMoveStart, CryptoError> {
+    let from_account = owner_account_for_path(from);
+    if !is_available() {
+        return Ok(OwnerKeychainMoveStart::BackendUnavailable { from_account });
+    }
+    let Some(secret) = get_secret(KEYCHAIN_SERVICE, &from_account)?.map(Zeroizing::new) else {
+        return Ok(OwnerKeychainMoveStart::NoEntry);
+    };
+    let to_account = owner_account_for_path(to);
+    let previous_to = get_secret(KEYCHAIN_SERVICE, &to_account)?.map(Zeroizing::new);
+    if let Err(err) = set_secret(KEYCHAIN_SERVICE, &to_account, secret.as_str()) {
+        let _ = rollback_keychain_secret(
+            KEYCHAIN_SERVICE,
+            &to_account,
+            previous_to.as_ref().map(|s| s.as_str()),
+        );
+        return Err(err);
+    }
+    Ok(OwnerKeychainMoveStart::Started(OwnerKeychainMove {
+        from_account,
+        to_account,
+        previous_to,
+    }))
+}
+
+impl OwnerKeychainMove {
+    /// The keychain account that now holds the secret for the new path.
+    pub fn destination_account(&self) -> &str {
+        &self.to_account
+    }
+
+    /// Remove the secret from the old path's account now that the keystore
+    /// it unlocks lives at the new path.
+    pub fn commit(self) -> Result<(), CryptoError> {
+        delete_secret(KEYCHAIN_SERVICE, &self.from_account).map(|_| ())
+    }
+
+    /// Restore the destination account to what it held before the copy.
+    pub fn abort(self) -> Result<(), CryptoError> {
+        rollback_keychain_secret(
+            KEYCHAIN_SERVICE,
+            &self.to_account,
+            self.previous_to.as_ref().map(|s| s.as_str()),
+        )
+    }
+}
+
 fn map_err(e: keyring::Error) -> CryptoError {
     match e {
         keyring::Error::NoStorageAccess(err) => CryptoError::KeychainAccessDenied {

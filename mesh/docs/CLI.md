@@ -898,6 +898,12 @@ Subcommands:
 
 - `--owner-key <OWNER_KEY>`: keystore path.
 
+`auth rotate-owner` moves the previous keystore to `owner-keystore.<timestamp>.bak.json`
+beside it. If that keystore was unlocked from the OS keychain, the keychain
+secret moves with it, so the backup still unlocks from the keychain. When no
+keychain is reachable, the command prints the keychain account names so the
+secret can be moved by hand.
+
 ## Model reference formats
 
 Supported for `models show`, `models download`, and `serve --model`:

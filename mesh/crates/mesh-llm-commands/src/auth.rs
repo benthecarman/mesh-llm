@@ -16,6 +16,10 @@ use mesh_llm_identity::{
 };
 use zeroize::Zeroizing;
 
+mod owner_rotation;
+
+pub(crate) use owner_rotation::run_rotate_owner;
+
 fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -853,63 +857,6 @@ pub(crate) fn run_revoke_node(
         writeln!(err, "Revoked node ID {normalized}")?;
     }
     writeln!(err, "Updated trust store {}", trust_store_path.display())?;
-    Ok(())
-}
-
-pub(crate) fn run_rotate_owner(
-    owner_key: Option<PathBuf>,
-    no_passphrase: bool,
-    force: bool,
-) -> Result<()> {
-    let owner_key_path = resolve_owner_key_path(owner_key)?;
-    let passphrase = prompt_new_passphrase(no_passphrase)?;
-    let new_keypair = OwnerKeypair::generate();
-
-    let backup_path = if owner_key_path.exists() {
-        let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
-        let backup_path =
-            owner_key_path.with_file_name(format!("owner-keystore.{timestamp}.bak.json"));
-        if backup_path.exists() && !force {
-            bail!(
-                "Backup file already exists at {} (use --force to overwrite).",
-                backup_path.display()
-            );
-        }
-        if backup_path.exists() {
-            std::fs::remove_file(&backup_path)?;
-        }
-        std::fs::rename(&owner_key_path, &backup_path)?;
-        Some(backup_path)
-    } else {
-        None
-    };
-
-    save_keystore(
-        &owner_key_path,
-        &new_keypair,
-        passphrase.as_deref().map(|value| value.as_str()),
-        true,
-    )?;
-
-    let _ = emit_audit(audit_events::admin_action(
-        Some(new_keypair.owner_id().to_string()),
-        "auth_rotate_owner",
-        Some("owner_keystore"),
-        true,
-        None,
-    ));
-
-    let mut err = mesh_llm_events::console_err();
-    writeln!(
-        err,
-        "Rotated owner keystore at {}",
-        owner_key_path.display()
-    )?;
-    writeln!(err, "New owner ID:    {}", new_keypair.owner_id())?;
-    if let Some(backup_path) = backup_path {
-        writeln!(err, "Backup:          {}", backup_path.display())?;
-    }
-
     Ok(())
 }
 
