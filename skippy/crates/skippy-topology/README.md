@@ -24,7 +24,8 @@ flowchart LR
     S["requested splits"] --> P
     P --> Plan["TopologyPlan"]
     Plan --> Stages["StagePlan<br/>layer ranges + nodes"]
-    Plan --> Bounds["BoundaryPlan<br/>accepted/rejected<br/>f32 payload size"]
+    P --> Rejected["PlanError::RejectedBoundaries<br/>rejected cuts + reasons"]
+    Plan --> Bounds["BoundaryPlan<br/>accepted<br/>f32 payload size"]
     Plan --> Diag["diagnostics<br/>reason codes"]
     Stages --> Caller["split launcher<br/>LoadStage downstream-to-upstream"]
     Bounds --> Caller
@@ -42,7 +43,7 @@ sequenceDiagram
     C->>T: infer_family_capability(model_id, layers, width)
     T-->>C: optional heuristic capability
     C->>P: plan_contiguous_with_splits(request, splits)
-    P-->>C: TopologyPlan with diagnostics
+    P-->>C: TopologyPlan with diagnostics, or RejectedBoundaries
 ```
 
 Callers may supply an explicit capability record from inspected model metadata.
@@ -54,7 +55,10 @@ runtime substitute for the loaded model's capabilities.
 - validate contiguous layer ranges and split boundaries
 - produce even contiguous plans or explicit split plans
 - classify stages as stateless, attention-KV, recurrent, or mixed
-- reject family-forbidden boundaries such as shared KV producer/consumer cuts
+- reject family-forbidden boundaries such as shared KV producer/consumer cuts;
+  a plan that crosses one fails with `PlanError::RejectedBoundaries`
+- reject requests whose layers do not cover `0..layer_count` or whose family
+  ranges fall outside the model
 - report fixed-f32 activation payload sizing
 - infer advisory capabilities for known dense/recurrent families
 

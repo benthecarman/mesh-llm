@@ -51,6 +51,21 @@ fn stage_layout(plan: &TopologyPlan) -> Vec<(&str, u32, u32)> {
         .collect()
 }
 
+fn rejected_boundaries(result: Result<TopologyPlan, PlanError>) -> Vec<BoundaryPlan> {
+    match result {
+        Err(PlanError::RejectedBoundaries { boundaries }) => {
+            assert!(!boundaries.is_empty());
+            assert!(
+                boundaries
+                    .iter()
+                    .all(|boundary| boundary.decision == BoundaryDecision::Rejected)
+            );
+            boundaries
+        }
+        other => panic!("expected rejected boundaries, got {other:?}"),
+    }
+}
+
 fn role_layout(plan: &TopologyPlan) -> Vec<Vec<StageRole>> {
     plan.stages
         .iter()
@@ -762,10 +777,10 @@ fn gemma4_e4b_rejects_shared_kv_consumer_boundaries() {
         policy: PlannerPolicy::default(),
     };
 
-    let plan = plan_even_contiguous(&request).expect("plan");
+    let boundaries = rejected_boundaries(plan_even_contiguous(&request));
 
     assert_eq!(
-        plan.boundaries
+        boundaries
             .iter()
             .map(|boundary| (boundary.layer_boundary, boundary.decision))
             .collect::<Vec<_>>(),
@@ -774,11 +789,11 @@ fn gemma4_e4b_rejects_shared_kv_consumer_boundaries() {
             (28, BoundaryDecision::Rejected)
         ]
     );
-    assert!(
-        plan.diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == PlanReasonCode::SharedKvRegionCut)
-    );
+    assert!(boundaries.iter().all(|boundary| {
+        boundary
+            .reason_codes
+            .contains(&PlanReasonCode::SharedKvRegionCut)
+    }));
 }
 
 #[test]
@@ -849,10 +864,9 @@ fn gemma3n_requires_altup_sideband_and_constrained_kv_boundary() {
         policy: PlannerPolicy::default(),
     };
 
-    let even_plan = plan_even_contiguous(&request).expect("even plan");
+    let rejected = rejected_boundaries(plan_even_contiguous(&request));
     assert_eq!(
-        even_plan
-            .boundaries
+        rejected
             .iter()
             .map(|boundary| {
                 (
@@ -863,18 +877,22 @@ fn gemma3n_requires_altup_sideband_and_constrained_kv_boundary() {
                 )
             })
             .collect::<Vec<_>>(),
-        vec![
-            (10, BoundaryDecision::Accepted, 32768, 32768),
-            (20, BoundaryDecision::Rejected, 32768, 32768)
-        ]
+        vec![(20, BoundaryDecision::Rejected, 32768, 32768)]
     );
-    assert!(even_plan.boundaries.iter().all(|boundary| {
+    assert!(rejected.iter().all(|boundary| {
         boundary
             .reason_codes
             .contains(&PlanReasonCode::ActivationSidebandRequired)
     }));
 
     let accepted_plan = plan_contiguous_with_splits(&request, &[10, 18]).expect("accepted plan");
+    assert!(accepted_plan.boundaries.iter().all(|boundary| {
+        boundary.raw_activation_bytes_per_token == 32768
+            && boundary.wire_payload_bytes_per_token == 32768
+            && boundary
+                .reason_codes
+                .contains(&PlanReasonCode::ActivationSidebandRequired)
+    }));
     assert_eq!(
         accepted_plan
             .boundaries
@@ -899,17 +917,10 @@ fn explicit_splits_return_reasoned_boundary_decisions() {
         policy: PlannerPolicy::default(),
     };
 
-    let plan = plan_contiguous_with_splits(&request, &[12, 24]).expect("plan");
+    let boundaries = rejected_boundaries(plan_contiguous_with_splits(&request, &[12, 24]));
 
     assert_eq!(
-        plan.stages
-            .iter()
-            .map(|stage| (stage.layer_start, stage.layer_end))
-            .collect::<Vec<_>>(),
-        vec![(0, 12), (12, 24), (24, 42)]
-    );
-    assert_eq!(
-        plan.boundaries
+        boundaries
             .iter()
             .map(|boundary| (boundary.layer_boundary, boundary.decision))
             .collect::<Vec<_>>(),

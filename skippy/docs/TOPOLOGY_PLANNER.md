@@ -85,6 +85,16 @@ For each boundary it records:
 - actual wire payload bytes per token;
 - reason codes and human-readable messages.
 
+A returned plan contains only accepted boundaries. When a planned cut crosses
+a boundary the family capability rejects, planning fails with
+`PlanError::RejectedBoundaries`, which carries each rejected boundary with its
+reason codes and messages.
+
+Requests must index layers `0..layer_count` in order, so every plan covers the
+whole model. A family capability must describe the same layer count, and its
+recurrent ranges, split-constraint ranges, and sideband layers must lie within
+the model.
+
 ## Initial Policy
 
 | Layer range | Normal activation routing | Active sequence migration |
@@ -215,7 +225,7 @@ The two entry points are:
 | Function | Use |
 | --- | --- |
 | `plan_even_contiguous` | Produce a simple contiguous plan across the available nodes. |
-| `plan_contiguous_with_splits` | Evaluate caller-provided split boundaries and return accepted/rejected boundary reasons. |
+| `plan_contiguous_with_splits` | Plan caller-provided split boundaries; a rejected boundary fails with `PlanError::RejectedBoundaries` and its reasons. |
 
 ## Launcher Integration
 

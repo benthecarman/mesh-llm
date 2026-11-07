@@ -326,9 +326,9 @@ fn validate_topology_stages(load: &proto::stage::LoadStage) -> Result<(), StageF
                 "stage layer ranges must be non-empty",
             ));
         }
-        if previous_end.is_some_and(|end| end != stage.layer_start) {
+        if previous_end.unwrap_or(0) != stage.layer_start {
             return Err(StageFrameError::InvalidTopologyStages(
-                "stage layer ranges must be contiguous",
+                "stage layer ranges must be contiguous from layer zero",
             ));
         }
         previous_end = Some(stage.layer_end);

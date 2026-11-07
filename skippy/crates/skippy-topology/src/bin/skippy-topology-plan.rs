@@ -2,8 +2,9 @@ use std::{env, io::Write};
 
 use serde_json::json;
 use skippy_topology::{
-    BoundaryDecision, NodeSpec, PlannerPolicy, TopologyPlanRequest, dense_attention_layers,
-    infer_family_capability, plan_balanced_accepted_contiguous, plan_contiguous_with_splits,
+    BoundaryDecision, NodeSpec, PlanError, PlannerPolicy, TopologyPlanRequest,
+    dense_attention_layers, infer_family_capability, plan_balanced_accepted_contiguous,
+    plan_contiguous_with_splits,
 };
 
 fn usage() -> Box<dyn std::error::Error> {
@@ -47,8 +48,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let boundaries = (1..layer_count)
         .map(|cut| {
-            let plan = plan_contiguous_with_splits(&request, &[cut])?;
-            let boundary = &plan.boundaries[0];
+            // A cut across a rejected boundary fails to plan; the error still
+            // carries the boundary's decision, reason codes and messages.
+            let boundary = match plan_contiguous_with_splits(&request, &[cut]) {
+                Ok(plan) => plan.boundaries.into_iter().next(),
+                Err(PlanError::RejectedBoundaries { boundaries }) => boundaries.into_iter().next(),
+                Err(error) => return Err(error),
+            }
+            .expect("a single cut has one boundary");
             Ok(json!({
                 "layer": cut,
                 "decision": if boundary.decision == BoundaryDecision::Accepted { "accepted" } else { "rejected" },
@@ -56,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "messages": &boundary.messages,
             }))
         })
-        .collect::<Result<Vec<_>, skippy_topology::PlanError>>()?;
+        .collect::<Result<Vec<_>, PlanError>>()?;
     let two_stage = plan_balanced_accepted_contiguous(&request, 2)?;
     let three_stage = plan_balanced_accepted_contiguous(&request, 3)?;
     let selected = |plan: &skippy_topology::TopologyPlan| {

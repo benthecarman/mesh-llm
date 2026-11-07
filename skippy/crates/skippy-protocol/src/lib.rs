@@ -444,6 +444,22 @@ mod tests {
             Err(StageFrameError::MissingLoadClaimHashes)
         ));
 
+        let mut offset_topology = load.clone();
+        let Some(stage_control_request::Command::LoadStage(load_stage)) =
+            offset_topology.command.as_mut()
+        else {
+            unreachable!("load fixture must contain LoadStage");
+        };
+        load_stage.layer_start = 4;
+        load_stage.admission = Some(admission(4, 16));
+        load_stage.topology_stages[0].layer_start = 4;
+        assert!(matches!(
+            validate_stage_control_request(&offset_topology),
+            Err(StageFrameError::InvalidTopologyStages(
+                "stage layer ranges must be contiguous from layer zero"
+            ))
+        ));
+
         let stop = StageControlRequest {
             command: Some(stage_control_request::Command::StopStage(StopStage {
                 topology_id: "topology-a".to_string(),

@@ -64,3 +64,58 @@ fn sampling_lengths_are_rejected_before_their_payload_is_read() {
 
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
 }
+
+/// A max-size frame whose chat metadata length prefix is grown by one byte,
+/// so the frame is well formed but one byte over the stage frame budget.
+fn frame_one_byte_over_budget() -> Vec<u8> {
+    let mut message = StageWireMessage::stop_with_identity(7, 11);
+    message.kind = WireMessageKind::ConfigureGeneration;
+    message.state = StageStateHeader::new(message.kind);
+    message.chat_sampling_metadata = Some(String::new());
+    let remaining = crate::MAX_STAGE_FRAME_BYTES - message.estimated_wire_bytes();
+    message.chat_sampling_metadata = Some("x".repeat(remaining));
+    let mut bytes = Vec::new();
+    write_stage_message(&mut bytes, &message).unwrap();
+    assert_eq!(bytes.len(), crate::MAX_STAGE_FRAME_BYTES);
+
+    let declared = u32::try_from(remaining).unwrap().to_le_bytes();
+    let prefix = bytes
+        .windows(5)
+        .position(|window| window[..4] == declared && window[4] == b'x')
+        .expect("chat metadata length prefix");
+    bytes[prefix..prefix + 4].copy_from_slice(&u32::try_from(remaining + 1).unwrap().to_le_bytes());
+    bytes.insert(prefix + 4, b'x');
+    bytes
+}
+
+#[test]
+fn public_readers_enforce_the_stage_frame_budget() {
+    let bytes = frame_one_byte_over_budget();
+
+    let decoded = read_stage_message_for_codec_policy_with_frame_budget(
+        Cursor::new(bytes.clone()),
+        1,
+        crate::StageActivationCodec::RawF32V1,
+        crate::StageActivationCodecPolicy::Fixed,
+        crate::MAX_STAGE_FRAME_BYTES + 1,
+    );
+    assert!(decoded.is_ok(), "frame is well formed: {decoded:?}");
+
+    let results = [
+        read_stage_message(Cursor::new(bytes.clone()), 1),
+        read_stage_message_for_codec(
+            Cursor::new(bytes.clone()),
+            1,
+            crate::StageActivationCodec::RawF32V1,
+        ),
+        read_stage_message_for_codec_policy(
+            Cursor::new(bytes),
+            1,
+            crate::StageActivationCodec::RawF32V1,
+            crate::StageActivationCodecPolicy::Fixed,
+        ),
+    ];
+    for result in results {
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    }
+}

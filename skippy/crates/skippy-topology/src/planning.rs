@@ -1,5 +1,5 @@
 use crate::edge_order::StageEdgeSignal;
-use crate::validation::{PlanError, validate_request};
+use crate::validation::{PlanError, reject_rejected_boundaries, validate_request};
 use crate::{
     BoundaryDecision, BoundaryPlan, DiagnosticSeverity, ExactStateMobility, FamilyCapabilityRecord,
     LayerSpec, MigrationPolicy, NodePlacementSignal, NodeSpec, PlanDiagnostic, PlanReasonCode,
@@ -37,7 +37,10 @@ fn plan_weighted_contiguous_with_signals(
 
     let stage_count = request.nodes.len().min(request.layers.len());
     let nodes = &request.nodes[..stage_count];
-    let total_weight: u64 = nodes.iter().map(|node| node.vram_bytes).sum();
+    let total_weight = nodes
+        .iter()
+        .map(|node| u128::from(node.vram_bytes))
+        .sum::<u128>();
     if total_weight == 0 {
         let base = request.layers.len() / stage_count;
         let remainder = request.layers.len() % stage_count;
@@ -61,7 +64,7 @@ fn plan_weighted_contiguous_with_signals(
         let mut span = if remaining_stages == 1 {
             remaining_layers
         } else {
-            (((request.layers.len() as u128) * (node.vram_bytes as u128)) / (total_weight as u128))
+            (((request.layers.len() as u128) * u128::from(node.vram_bytes)) / total_weight)
                 .try_into()
                 .unwrap_or(usize::MAX)
         };
@@ -139,19 +142,8 @@ pub fn plan_contiguous_with_splits(
     request: &TopologyPlanRequest,
     splits: &[u32],
 ) -> Result<TopologyPlan, PlanError> {
-    validate_request(request)?;
-
-    let layer_start = request
-        .layers
-        .first()
-        .expect("validated non-empty layers")
-        .index;
-    let layer_end = request
-        .layers
-        .last()
-        .expect("validated non-empty layers")
-        .index
-        + 1;
+    let layer_end = validate_request(request)?;
+    let layer_start = 0;
     let mut previous = layer_start;
     let mut boundaries = Vec::with_capacity(splits.len() + 2);
     boundaries.push(layer_start);
@@ -179,15 +171,9 @@ pub fn plan_contiguous_with_splits(
         });
     }
 
-    let first_layer = request.layers[0].index;
     let ranges = boundaries
         .windows(2)
-        .map(|window| {
-            (
-                (window[0] - first_layer) as usize,
-                (window[1] - first_layer) as usize,
-            )
-        })
+        .map(|window| (window[0] as usize, window[1] as usize))
         .collect::<Vec<_>>();
 
     plan_ranges(request, &ranges)
@@ -203,7 +189,7 @@ pub fn plan_balanced_accepted_contiguous(
     request: &TopologyPlanRequest,
     stage_count: usize,
 ) -> Result<TopologyPlan, PlanError> {
-    validate_request(request)?;
+    let layer_end = validate_request(request)?;
     if stage_count < 2 {
         return Err(PlanError::InvalidStageCount {
             stages: stage_count,
@@ -221,17 +207,8 @@ pub fn plan_balanced_accepted_contiguous(
         });
     }
 
-    let layer_start = request.layers[0].index;
-    let layer_end = request.layers.last().expect("validated layers").index + 1;
-    let accepted = (layer_start + 1..layer_end)
-        .filter(|boundary| {
-            plan_contiguous_with_splits(request, &[*boundary]).is_ok_and(|plan| {
-                plan.boundaries
-                    .iter()
-                    .all(|item| item.decision == BoundaryDecision::Accepted)
-            })
-        })
-        .collect::<Vec<_>>();
+    let layer_start = 0;
+    let accepted = accepted_boundaries(request, layer_start, layer_end)?;
 
     let split_count = stage_count - 1;
     let mut best: Option<(u128, Vec<u32>)> = None;
@@ -250,17 +227,27 @@ pub fn plan_balanced_accepted_contiguous(
             stages: stage_count,
         });
     };
-    let plan = plan_contiguous_with_splits(request, &splits)?;
-    if plan
-        .boundaries
-        .iter()
-        .any(|boundary| boundary.decision != BoundaryDecision::Accepted)
-    {
-        return Err(PlanError::NoAcceptedBalancedSplit {
-            stages: stage_count,
-        });
+    // A boundary's decision depends only on its layer, so a set of
+    // individually accepted boundaries plans together.
+    plan_contiguous_with_splits(request, &splits)
+}
+
+/// Every interior boundary the family accepts as a single cut. A rejected cut
+/// is skipped; any other planning error fails the selection.
+fn accepted_boundaries(
+    request: &TopologyPlanRequest,
+    layer_start: u32,
+    layer_end: u32,
+) -> Result<Vec<u32>, PlanError> {
+    let mut accepted = Vec::new();
+    for boundary in layer_start + 1..layer_end {
+        match plan_contiguous_with_splits(request, &[boundary]) {
+            Ok(_) => accepted.push(boundary),
+            Err(PlanError::RejectedBoundaries { .. }) => {}
+            Err(error) => return Err(error),
+        }
     }
-    Ok(plan)
+    Ok(accepted)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -326,6 +313,11 @@ fn plan_ranges(
     plan_ranges_with_signals(request, ranges, &[])
 }
 
+/// Builds the plan for validated `ranges` and fails it when a stage boundary
+/// is rejected by the family capability.
+///
+/// Callers pass non-empty, contiguous ranges over a request accepted by
+/// `validate_request`, whose layer indices equal their positions and fit `u32`.
 fn plan_ranges_with_signals(
     request: &TopologyPlanRequest,
     ranges: &[(usize, usize)],
@@ -335,11 +327,16 @@ fn plan_ranges_with_signals(
 
     for (stage_index, &(start, end)) in ranges.iter().enumerate() {
         let layers = &request.layers[start..end];
-        let layer_start = layers.first().expect("validated non-empty range").index;
-        let layer_end = layers.last().expect("validated non-empty range").index + 1;
+        let layer_start = u32::try_from(start).expect("validated layer count fits u32");
+        let layer_end = u32::try_from(end).expect("validated layer count fits u32");
         let state_affinity = classify_layers_with_family(layers, request.family.as_ref());
         let migration_policy = migration_policy(state_affinity, request.policy);
-        let parameter_bytes = layers.iter().map(|layer| layer.parameter_bytes).sum();
+        let parameter_bytes = layers
+            .iter()
+            .try_fold(0u64, |total, layer| {
+                total.checked_add(layer.parameter_bytes)
+            })
+            .ok_or(PlanError::StageParameterBytesOverflow { stage_index })?;
         let node = &request.nodes[stage_index];
         let node_id = node.node_id.clone();
         let placement_signal = placement_signal_for(placement_signals, &node_id);
@@ -354,7 +351,7 @@ fn plan_ranges_with_signals(
             roles: stage_roles(stage_index, ranges.len()),
             layer_start,
             layer_end,
-            layer_count: (end - start) as u32,
+            layer_count: layer_end - layer_start,
             parameter_bytes,
             state_affinity,
             migration_policy,
@@ -378,7 +375,7 @@ fn plan_ranges_with_signals(
         request.policy,
     );
 
-    Ok(TopologyPlan {
+    reject_rejected_boundaries(TopologyPlan {
         topology_id: request.topology_id.clone(),
         model_id: request.model_id.clone(),
         family_id: request

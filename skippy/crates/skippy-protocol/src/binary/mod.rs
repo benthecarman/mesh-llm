@@ -1006,8 +1006,20 @@ mod tests {
             u32::try_from(MAX_STAGE_CHAT_SAMPLING_METADATA_BYTES + 1).unwrap(),
         );
 
+        // The field cap equals the stage frame budget, so the public reader
+        // rejects the declared length against the budget first.
         assert_invalid_data(
-            read_stage_message(Cursor::new(bytes), 2048),
+            read_stage_message(Cursor::new(bytes.clone()), 2048),
+            "chat sampling metadata length exceeds frame budget",
+        );
+        assert_invalid_data(
+            read_stage_message_for_codec_policy_with_frame_budget(
+                Cursor::new(bytes),
+                2048,
+                crate::StageActivationCodec::RawF32V1,
+                crate::StageActivationCodecPolicy::Fixed,
+                2 * MAX_STAGE_CHAT_SAMPLING_METADATA_BYTES,
+            ),
             "chat sampling metadata length exceeds maximum",
         );
     }

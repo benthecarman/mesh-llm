@@ -330,8 +330,10 @@ pub(super) async fn start_runtime_split_model(
             SplitTopologyResourceInputs {
                 native_context_length: compact_meta.context_length,
                 kv_bytes_per_token,
-                recurrent_bytes_per_sequence_by_layer: compact_meta
-                    .recurrent_bytes_per_configured_lane_by_layer(),
+                recurrent_bytes_per_sequence_by_layer: planned_recurrent_bytes_by_layer(
+                    &compact_meta,
+                    package.layer_count,
+                ),
                 ctx_size_override: spec.ctx_size_override,
                 parallel_override: spec.parallel_override,
                 placement: spec.placement,
@@ -379,6 +381,19 @@ struct SplitRuntimeStartPreparation {
     planned_topology: PlannedRuntimeSliceTopology,
     stage_admissions: Vec<skippy_protocol::StageAdmissionDescriptor>,
     topology_locked: bool,
+}
+
+/// Per-layer recurrent bytes for one configured lane over the package's
+/// planned layers. GGUF metadata also counts trailing MTP (nextn) layers that
+/// a package does not plan; the topology planner rejects a per-layer vector
+/// that is not aligned to the planned layers.
+fn planned_recurrent_bytes_by_layer(
+    compact_meta: &models::gguf::GgufCompactMeta,
+    planned_layer_count: u32,
+) -> Vec<u64> {
+    let mut bytes = compact_meta.recurrent_bytes_per_configured_lane_by_layer();
+    bytes.truncate(planned_layer_count as usize);
+    bytes
 }
 
 /// See [`loading::split_dflash_final_stage_charge`].
@@ -448,8 +463,10 @@ async fn prepare_split_runtime_start(
     let resources = SplitTopologyResourceInputs {
         native_context_length: compact_meta.context_length,
         kv_bytes_per_token,
-        recurrent_bytes_per_sequence_by_layer: compact_meta
-            .recurrent_bytes_per_configured_lane_by_layer(),
+        recurrent_bytes_per_sequence_by_layer: planned_recurrent_bytes_by_layer(
+            &compact_meta,
+            package.layer_count,
+        ),
         ctx_size_override: spec.ctx_size_override,
         parallel_override: spec.parallel_override,
         placement: spec.placement,

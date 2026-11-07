@@ -116,7 +116,8 @@ impl ThroughputEstimate {
 /// Estimate per-stage decode time for `stages` using each node's speed.
 ///
 /// Returns `None` when any stage's node has no speed estimate, because a
-/// partial estimate cannot identify the bottleneck.
+/// partial estimate cannot identify the bottleneck, or when a stage's range
+/// lies outside `layer_weights`.
 pub(super) fn estimate_throughput(
     stages: &[TopologyStagePlan],
     nodes: &[UsableNode],
@@ -125,7 +126,8 @@ pub(super) fn estimate_throughput(
     let mut estimates = Vec::with_capacity(stages.len());
     for stage in stages {
         let speed = node_speed(nodes, &stage.node_id)?;
-        let bytes = sum_u64(&layer_weights[stage.layer_start as usize..stage.layer_end as usize]);
+        let bytes =
+            sum_u64(layer_weights.get(stage.layer_start as usize..stage.layer_end as usize)?);
         estimates.push(StageDecodeEstimate {
             stage_index: stage.stage_index,
             node_id: stage.node_id.clone(),

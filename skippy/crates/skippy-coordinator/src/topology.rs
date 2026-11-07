@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 
 mod capacity;
+mod input_validation;
 mod locked;
 mod performance;
 
@@ -9,6 +10,7 @@ pub use capacity::{
     context_scaled_kv_bytes, default_runtime_headroom_bytes, diagnostic_candidate_bytes_per_layer,
     repriced_stage_weight_bytes, required_stage_bytes,
 };
+use input_validation::validate_input;
 
 pub use locked::{LockedTopologyStage, plan_locked_topology};
 pub use performance::{PlacementObjective, StageDecodeEstimate, ThroughputEstimate};
@@ -113,6 +115,12 @@ pub enum TopologyPlanError {
     MissingKvBytesPerToken,
     #[error("topology planning requires at least one node")]
     MissingNodes,
+    #[error("{field} has {found} entries; model has {layer_count} layers")]
+    LayerVectorLengthMismatch {
+        field: &'static str,
+        found: usize,
+        layer_count: u32,
+    },
     #[error("requested context {requested} is below minimum valid context {minimum}")]
     ContextBelowMinimum { requested: u32, minimum: u32 },
     #[error("requested context {requested} exceeds native context {native}")]
@@ -167,12 +175,13 @@ pub fn plan_topology_with_stage0(
 /// `input` (typically measured from the running stages), keeping its nodes,
 /// stage order, context and lanes.
 ///
-/// Returns `None` when a node lacks a speed, no feasible cut exists, or the
-/// balanced cut is the current one.
+/// Returns `None` when `input` is invalid, a node lacks a speed, no feasible
+/// cut exists, or the balanced cut is the current one.
 pub fn rebalance_topology(
     input: &TopologyPlanningInput,
     current: &TopologyPlan,
 ) -> Option<TopologyPlan> {
+    validate_input(input).ok()?;
     let nodes = usable_nodes(&input.nodes);
     let layer_weights = layer_weight_bytes(input);
     let layer_required =
@@ -200,10 +209,14 @@ pub fn rebalance_topology(
 }
 
 /// Estimate per-stage decode time for `plan` from the node speeds in `input`.
+///
+/// Returns `None` when `input` is invalid, a stage lies outside the model's
+/// layers, or a node lacks a speed.
 pub fn estimate_plan_throughput(
     input: &TopologyPlanningInput,
     plan: &TopologyPlan,
 ) -> Option<ThroughputEstimate> {
+    validate_input(input).ok()?;
     performance::estimate_throughput(
         &plan.stages,
         &usable_nodes(&input.nodes),
@@ -284,31 +297,6 @@ fn plan_topology_with_required_stage0(
     }
 
     Err(TopologyPlanError::NoValidTopology { minimum_context })
-}
-
-fn validate_input(input: &TopologyPlanningInput) -> Result<(), TopologyPlanError> {
-    if input.native_context_length == 0 {
-        return Err(TopologyPlanError::MissingNativeContext);
-    }
-    if input.layer_count == 0 {
-        return Err(TopologyPlanError::MissingLayers);
-    }
-    if input.model_weight_bytes == 0 {
-        return Err(TopologyPlanError::MissingModelWeights);
-    }
-    let recurrent_only = input.recurrent_bytes_per_sequence_by_layer.len()
-        == input.layer_count as usize
-        && input
-            .recurrent_bytes_per_sequence_by_layer
-            .iter()
-            .all(|bytes| *bytes > 0);
-    if input.kv_bytes_per_token == 0 && !recurrent_only {
-        return Err(TopologyPlanError::MissingKvBytesPerToken);
-    }
-    if input.nodes.is_empty() {
-        return Err(TopologyPlanError::MissingNodes);
-    }
-    Ok(())
 }
 
 fn context_candidates(
@@ -665,6 +653,8 @@ fn decode_tpot_target_met(estimate: Option<u32>, target: Option<u32>) -> Option<
     Some(estimate? <= target?)
 }
 
+/// Exact per-layer weights, or an even share when absent. `validate_input`
+/// rejects a vector of any other length.
 fn layer_weight_bytes(input: &TopologyPlanningInput) -> Vec<u64> {
     if input.layer_weight_bytes.len() == input.layer_count as usize {
         return input.layer_weight_bytes.clone();
@@ -675,6 +665,8 @@ fn layer_weight_bytes(input: &TopologyPlanningInput) -> Vec<u64> {
     vec![weight_per_layer; input.layer_count as usize]
 }
 
+/// Per-layer recurrent bytes, or zero when absent. `validate_input` rejects a
+/// vector of any other length.
 fn recurrent_bytes_by_layer(input: &TopologyPlanningInput) -> Vec<u64> {
     if input.recurrent_bytes_per_sequence_by_layer.len() == input.layer_count as usize {
         return input.recurrent_bytes_per_sequence_by_layer.clone();

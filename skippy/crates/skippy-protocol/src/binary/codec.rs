@@ -428,10 +428,14 @@ pub fn write_stage_message(mut writer: impl Write, message: &StageWireMessage) -
     Ok(())
 }
 
+/// Decodes one wire message within the documented stage frame budget
+/// (`crate::MAX_STAGE_FRAME_BYTES`), the same bound `write_stage_message`
+/// enforces on every frame it sends.
 pub fn read_stage_message(reader: impl Read, _n_embd: i32) -> io::Result<StageWireMessage> {
-    read_stage_message_inner(reader, None, None)
+    read_stage_message_inner(reader, None, Some(crate::MAX_STAGE_FRAME_BYTES))
 }
 
+/// [`read_stage_message`] for a fixed activation codec.
 pub fn read_stage_message_for_codec(
     reader: impl Read,
     _n_embd: i32,
@@ -440,17 +444,22 @@ pub fn read_stage_message_for_codec(
     read_stage_message_inner(
         reader,
         Some((expected_codec, StageActivationCodecPolicy::Fixed)),
-        None,
+        Some(crate::MAX_STAGE_FRAME_BYTES),
     )
 }
 
+/// [`read_stage_message`] for a configured activation codec policy.
 pub fn read_stage_message_for_codec_policy(
     reader: impl Read,
     _n_embd: i32,
     configured_codec: StageActivationCodec,
     policy: StageActivationCodecPolicy,
 ) -> io::Result<StageWireMessage> {
-    read_stage_message_inner(reader, Some((configured_codec, policy)), None)
+    read_stage_message_inner(
+        reader,
+        Some((configured_codec, policy)),
+        Some(crate::MAX_STAGE_FRAME_BYTES),
+    )
 }
 
 /// Decodes one wire message while enforcing a per-frame wire-byte budget on
@@ -471,6 +480,9 @@ pub fn read_stage_message_for_codec_policy_with_frame_budget(
 }
 
 /// Decode a stage message with bounded payloads and kind-specific validation.
+///
+/// Stays private so every public reader passes a frame budget; without one,
+/// declared lengths are bounded only by the per-field maxima.
 fn read_stage_message_inner(
     mut reader: impl Read,
     expected_codec: Option<(StageActivationCodec, StageActivationCodecPolicy)>,

@@ -46,6 +46,26 @@ lifecycle_health_interval_ms = 5000
 }
 
 #[test]
+fn planned_recurrent_bytes_drop_unplanned_mtp_layers() {
+    let meta = models::gguf::GgufCompactMeta {
+        layer_count: 4,
+        nextn_predict_layers: 1,
+        ssm_conv_kernel: 4,
+        ssm_inner_size: 8,
+        ssm_state_size: 2,
+        ssm_group_count: 1,
+        kv_head_counts: vec![0, 0, 4, 4],
+        ..Default::default()
+    };
+    let by_gguf_layer = meta.recurrent_bytes_per_configured_lane_by_layer();
+    assert_eq!(by_gguf_layer.len(), 4);
+
+    let planned = planned_recurrent_bytes_by_layer(&meta, 3);
+    assert_eq!(planned, by_gguf_layer[..3]);
+    assert!(planned[0] > 0);
+}
+
+#[test]
 fn stage_zero_runtime_config_carries_the_admitted_activation_frontier() {
     let mut load = stage_load_request(LoadMode::RuntimeSlice);
     load.admission.kv_graph_state = "dense".to_string();
