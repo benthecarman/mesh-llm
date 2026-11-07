@@ -111,7 +111,6 @@ async fn paused_inbound_quic_http_rejects_before_reading_or_routing_request() {
     let (_target_tx, target_rx) = watch::channel(targets);
     let tunnel_manager = TunnelManager::start(
         receiver.clone(),
-        receiver_channels.rpc,
         receiver_channels.http,
         receiver_channels.stage,
     )
@@ -170,7 +169,6 @@ async fn inbound_quic_http_dispatches_without_local_api_listener() {
     let (_target_tx, target_rx) = watch::channel(targets);
     let tunnel_manager = TunnelManager::start(
         receiver.clone(),
-        receiver_channels.rpc,
         receiver_channels.http,
         receiver_channels.stage,
     )
@@ -213,7 +211,6 @@ async fn assert_passive_legacy_lifecycle_path_is_rejected(path: &str) {
     let (_target_tx, target_rx) = watch::channel(targets);
     let tunnel_manager = TunnelManager::start(
         receiver.clone(),
-        receiver_channels.rpc,
         receiver_channels.http,
         receiver_channels.stage,
     )

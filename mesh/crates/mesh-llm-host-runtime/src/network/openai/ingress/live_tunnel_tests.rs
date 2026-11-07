@@ -36,10 +36,9 @@ async fn quic_request_with_id(host: &LiveHost, body: &[u8], exchange_id: uuid::U
         .await
         .unwrap();
     let caller_id = caller.id();
-    let (legacy_tx, legacy_rx) = tokio::sync::mpsc::channel(1);
     let (http_tx, http_rx) = tokio::sync::mpsc::channel(1);
     let (stage_tx, stage_rx) = tokio::sync::mpsc::channel(1);
-    let tunnels = Manager::start(host.node.clone(), legacy_rx, http_rx, stage_rx)
+    let tunnels = Manager::start(host.node.clone(), http_rx, stage_rx)
         .await
         .unwrap();
     let (_targets_tx, targets_rx) = tokio::sync::watch::channel(host.targets.clone());
@@ -83,7 +82,7 @@ async fn quic_request_with_id(host: &LiveHost, body: &[u8], exchange_id: uuid::U
     .unwrap();
     connection.close(0u32.into(), b"test complete");
     server_connection.close(0u32.into(), b"test complete");
-    drop((tunnels, legacy_tx, stage_tx));
+    drop((tunnels, stage_tx));
     caller.endpoint.close().await;
     response
 }
@@ -276,10 +275,9 @@ async fn installed_lifecycle_quic_gateway_and_server_share_exchange_identity() {
         "allowed-model".into(),
         vec![InferenceTarget::Remote(seller.node.id())],
     );
-    let (legacy_tx, legacy_rx) = tokio::sync::mpsc::channel(1);
     let (http_tx, http_rx) = tokio::sync::mpsc::channel(1);
     let (stage_tx, stage_rx) = tokio::sync::mpsc::channel(1);
-    let tunnels = Manager::start(seller.node.clone(), legacy_rx, http_rx, stage_rx)
+    let tunnels = Manager::start(seller.node.clone(), http_rx, stage_rx)
         .await
         .unwrap();
     let (_targets_tx, targets_rx) = tokio::sync::watch::channel(seller.targets.clone());
@@ -359,7 +357,7 @@ async fn installed_lifecycle_quic_gateway_and_server_share_exchange_identity() {
     assert_eq!(buyer.requests.lock().await.len(), 0);
     assert_eq!(seller.requests.lock().await.len(), 1);
     serving.await.unwrap().close(0u32.into(), b"test complete");
-    drop((tunnels, legacy_tx, stage_tx));
+    drop((tunnels, stage_tx));
     buyer.stop().await;
     seller.stop().await;
 }

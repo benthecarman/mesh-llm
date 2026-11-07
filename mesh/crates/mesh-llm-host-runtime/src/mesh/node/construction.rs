@@ -92,7 +92,6 @@ impl Node {
 
         let (peer_change_tx, peer_change_rx) = watch::channel(0usize);
         let (inflight_change_tx, _inflight_change_rx) = watch::channel(0u64);
-        let (tunnel_tx, tunnel_rx) = tokio::sync::mpsc::channel(256);
         let (tunnel_http_tx, tunnel_http_rx) = tokio::sync::mpsc::channel(256);
         let (stage_transport_tx, stage_transport_rx) = tokio::sync::mpsc::channel(256);
 
@@ -191,7 +190,6 @@ impl Node {
             local_request_metrics: Arc::new(LocalRequestMetricsSampler::default()),
             plugin_frame_telemetry: Arc::new(PluginFrameTelemetry::default()),
             runtime_data_producer,
-            tunnel_tx,
             tunnel_http_tx,
             stage_transport_tx,
             stage_control_tx: Arc::new(Mutex::new(None)),
@@ -270,7 +268,6 @@ impl Node {
         Ok((
             node,
             TunnelChannels {
-                rpc: tunnel_rx,
                 http: tunnel_http_rx,
                 stage: stage_transport_rx,
             },

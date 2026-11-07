@@ -1,5 +1,21 @@
 use super::*;
 
+/// Refuses a legacy raw `STREAM_TUNNEL` stream. No node serves raw tunnels
+/// any more, so the stream is closed on its own and the connection keeps
+/// dispatching the peer's other streams.
+fn refuse_legacy_tunnel_stream(
+    remote: EndpointId,
+    mut send: iroh::endpoint::SendStream,
+    mut recv: iroh::endpoint::RecvStream,
+) {
+    tracing::debug!(
+        "Refusing legacy raw tunnel stream from {}",
+        remote.fmt_short()
+    );
+    let _ = recv.stop(0u32.into());
+    let _ = send.reset(0u32.into());
+}
+
 impl Node {
     /// Dispatch bi-streams on a connection by type byte
     pub(crate) fn dispatch_streams(
@@ -20,25 +36,14 @@ impl Node {
         slot: Option<tokio::sync::OwnedSemaphorePermit>,
     ) -> bool {
         if stream_type == STREAM_TUNNEL {
-            return self.forward_tunnel_stream(send, recv).await;
+            refuse_legacy_tunnel_stream(remote, send, recv);
+            return true;
         }
         if stream_type == STREAM_TUNNEL_HTTP {
             return self.forward_tunnel_http_stream(remote, send, recv).await;
         }
 
         self.spawn_non_tunnel_mesh_stream(remote, protocol, stream_type, send, recv, slot);
-        true
-    }
-
-    pub(crate) async fn forward_tunnel_stream(
-        &self,
-        send: iroh::endpoint::SendStream,
-        recv: iroh::endpoint::RecvStream,
-    ) -> bool {
-        if self.tunnel_tx.send((send, recv)).await.is_err() {
-            tracing::warn!("Tunnel receiver dropped");
-            return false;
-        }
         true
     }
 

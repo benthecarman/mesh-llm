@@ -883,7 +883,7 @@ The control plane uses QUIC ALPN `mesh-llm/1` with the `meshllm.node.v1` protobu
 | 0x0c | CONFIG_PUSH | reserved legacy mesh-plane config stream ID; do not reuse |
 | 0x0d | STREAM_SUBPROTOCOL | protobuf `MeshSubprotocolOpen`, then subprotocol-owned bytes |
 
-Config and inventory mutation must use `mesh-llm-control/2`; `mesh-llm/1` no longer dispatches request/response handlers for the reserved 0x0b/0x0c config stream IDs. Raw TCP relay streams (0x02 RPC, 0x04 HTTP) are unchanged.
+Config and inventory mutation must use `mesh-llm-control/2`; `mesh-llm/1` no longer dispatches request/response handlers for the reserved 0x0b/0x0c config stream IDs. The raw TCP relay stream 0x04 (HTTP) is unchanged; the retired 0x02 RPC relay is refused.
 
 
 ### Verifying protobuf gossip in logs

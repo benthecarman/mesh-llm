@@ -25,7 +25,7 @@ pub(crate) fn start_serving_attachment(
     membership_capacity: usize,
 ) -> JoinHandle<()> {
     let mut incoming = channels.http;
-    drop((channels.rpc, channels.stage));
+    drop(channels.stage);
     let ingress = super::HttpIngress {
         targets,
         affinity: AffinityRouter::new(),

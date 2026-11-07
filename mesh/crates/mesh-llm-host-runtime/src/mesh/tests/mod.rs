@@ -20,6 +20,7 @@ include!("protocol_frames.rs");
 include!("admission.rs");
 include!("requirements.rs");
 include!("plugin_mesh_identity.rs");
+include!("legacy_tunnel_stream.rs");
 
 mod split_coverage {
     use super::super::*;

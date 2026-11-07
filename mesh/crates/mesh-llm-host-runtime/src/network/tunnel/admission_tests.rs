@@ -77,9 +77,8 @@ async fn tunneled_http_ingress_caps_concurrent_requests_per_peer() {
     let manager_node = receiver.clone();
     let http_rx = receiver_channels.http;
     let stage_rx = receiver_channels.stage;
-    let legacy_rx = receiver_channels.rpc;
     tokio::spawn(async move {
-        let _manager = Manager::start(manager_node, legacy_rx, http_rx, stage_rx)
+        let _manager = Manager::start(manager_node, http_rx, stage_rx)
             .await
             .expect("start the receiver's tunnel manager");
     });

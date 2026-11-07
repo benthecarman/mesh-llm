@@ -115,14 +115,14 @@ Single QUIC connection per peer, multiplexed by 1-byte prefix:
 | Byte | Type | Purpose | Format |
 |------|------|---------|--------|
 | 0x01 | GOSSIP | Peer announcements (role, serving, VRAM, models, explicit interest, demand, mesh_id) | protobuf `GossipFrame` |
-| 0x02 | TUNNEL | TCP relay for remote runtime compute traffic | raw TCP relay |
+| 0x02 | TUNNEL | Retired raw TCP relay; refused, so do not reuse | none |
 | 0x03 | TUNNEL_MAP | B2B tunnel port map exchange | protobuf `TunnelMap` |
 | 0x04 | TUNNEL_HTTP | TCP relay to a remote node's HTTP API | raw TCP relay |
 | 0x05 | ROUTE_REQUEST | Routing table for passive nodes (hosts + models) | protobuf `RouteTableRequest` / `RouteTable` |
 | 0x06 | PEER_DOWN | Death broadcast (immediate, from any node that detects a death) | protobuf `PeerDown` |
 | 0x07 | PEER_LEAVING | Clean shutdown broadcast (ctrl-c) | protobuf `PeerLeaving` |
 
-Streams 0x02 and 0x04 are raw TCP relay tunnels and are not subject to protobuf framing or generation validation.
+Stream 0x04 is a raw TCP relay tunnel and is not subject to protobuf framing or generation validation. A node refuses a 0x02 stream on its own and keeps serving the connection's other streams.
 
 ## Multi-Model
 

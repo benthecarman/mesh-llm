@@ -1,6 +1,8 @@
+mod frame_read;
 mod message_history;
 #[cfg(test)]
 mod relay_tests;
+use frame_read::read_plugin_frame_bytes;
 pub(super) use message_history::PluginMessageHistory;
 
 use super::*;
@@ -8,8 +10,6 @@ use crate::mesh::node::stamp_plugin_event_source;
 use crate::plugin::ChannelRoute;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const PLUGIN_FRAME_PREFIX_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-const PLUGIN_FRAME_BODY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const PLUGIN_CHANNEL_FRAME_MAX_BYTES: usize = 10_000_000;
 const PLUGIN_BULK_FRAME_MAX_BYTES: usize = 64_000_000;
 const PLUGIN_FRAME_SIGNATURE_TTL_MS: u64 = 120_000;
@@ -316,39 +316,6 @@ pub(crate) fn plugin_frame_warn_slot(
         },
     );
     Some(0)
-}
-
-pub(crate) async fn read_plugin_frame_bytes<R>(reader: &mut R, max_len: usize) -> Result<Vec<u8>>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut len_buf = [0u8; 4];
-    tokio::time::timeout(
-        PLUGIN_FRAME_PREFIX_READ_TIMEOUT,
-        tokio::io::AsyncReadExt::read_exact(reader, &mut len_buf),
-    )
-    .await
-    .map_err(|_| {
-        anyhow::anyhow!(
-            "timeout reading plugin frame prefix after {PLUGIN_FRAME_PREFIX_READ_TIMEOUT:?}"
-        )
-    })?
-    .context("read plugin frame prefix")?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    anyhow::ensure!(len <= max_len, "Plugin frame too large");
-    let mut buf = vec![0u8; len];
-    tokio::time::timeout(
-        PLUGIN_FRAME_BODY_READ_TIMEOUT,
-        tokio::io::AsyncReadExt::read_exact(reader, &mut buf),
-    )
-    .await
-    .map_err(|_| {
-        anyhow::anyhow!(
-            "timeout reading plugin frame body after {PLUGIN_FRAME_BODY_READ_TIMEOUT:?}"
-        )
-    })?
-    .context("read plugin frame body")?;
-    Ok(buf)
 }
 
 impl Node {

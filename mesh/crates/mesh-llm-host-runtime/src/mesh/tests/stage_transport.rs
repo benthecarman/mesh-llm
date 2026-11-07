@@ -784,32 +784,6 @@ async fn local_stage_control_response_wait_has_timeout() {
     );
 }
 
-#[tokio::test(start_paused = true)]
-async fn plugin_frame_prefix_and_body_reads_have_timeouts() {
-    use tokio::io::AsyncWriteExt as _;
-
-    let (_prefix_writer, mut prefix_reader) = tokio::io::duplex(1);
-    let prefix_error = read_plugin_frame_bytes(&mut prefix_reader, 1024)
-        .await
-        .expect_err("stalled prefix read must time out");
-    assert!(
-        prefix_error
-            .to_string()
-            .contains("timeout reading plugin frame prefix")
-    );
-
-    let (mut body_writer, mut body_reader) = tokio::io::duplex(8);
-    body_writer.write_all(&4u32.to_le_bytes()).await.unwrap();
-    let body_error = read_plugin_frame_bytes(&mut body_reader, 1024)
-        .await
-        .expect_err("stalled body read must time out");
-    assert!(
-        body_error
-            .to_string()
-            .contains("timeout reading plugin frame body")
-    );
-}
-
 #[tokio::test]
 async fn stage_transport_bridge_reservation_rejects_duplicate_request() -> Result<()> {
     let node = make_test_node(super::NodeRole::Worker).await?;
@@ -1229,7 +1203,6 @@ async fn stage_transport_only_admits_assigned_edges_of_the_target_stage() -> Res
     // Drive the production tunnel task exactly as the runtime does.
     let tunnel = crate::network::tunnel::Manager::start(
         victim.clone(),
-        channels.rpc,
         channels.http,
         channels.stage,
     )

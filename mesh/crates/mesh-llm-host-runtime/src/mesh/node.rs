@@ -153,8 +153,6 @@ pub struct Node {
     /// plugin-frame decision never contends with the mesh-wide state mutex.
     pub(crate) plugin_frame_telemetry: Arc<PluginFrameTelemetry>,
     pub(crate) runtime_data_producer: crate::runtime_data::RuntimeDataProducer,
-    pub(crate) tunnel_tx:
-        tokio::sync::mpsc::Sender<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
     pub(crate) tunnel_http_tx: tokio::sync::mpsc::Sender<(
         EndpointId,
         iroh::endpoint::SendStream,
@@ -805,7 +803,6 @@ impl Node {
         let test_live_request_defaults = test_config_state.live_request_defaults();
         let (peer_change_tx, peer_change_rx) = watch::channel(0usize);
         let (inflight_change_tx, _inflight_change_rx) = watch::channel(0u64);
-        let (tunnel_tx, _tunnel_rx) = tokio::sync::mpsc::channel(256);
         let (tunnel_http_tx, _tunnel_http_rx) = tokio::sync::mpsc::channel(256);
         let (stage_transport_tx, _stage_transport_rx) = tokio::sync::mpsc::channel(256);
         let runtime_data_collector = crate::runtime_data::RuntimeDataCollector::new();
@@ -878,7 +875,6 @@ impl Node {
             local_request_metrics: Arc::new(LocalRequestMetricsSampler::default()),
             plugin_frame_telemetry: Arc::new(PluginFrameTelemetry::default()),
             runtime_data_producer,
-            tunnel_tx,
             tunnel_http_tx,
             stage_transport_tx,
             stage_control_tx: Arc::new(Mutex::new(None)),

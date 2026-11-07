@@ -21,7 +21,7 @@ Each QUIC connection carries multiple logical streams, distinguished by a 1-byte
 | Byte | Name | Direction | Format |
 |------|------|-----------|--------|
 | 0x01 | GOSSIP | bidirectional | protobuf `GossipFrame` |
-| 0x02 | TUNNEL | bidirectional | raw TCP relay (not protobuf) |
+| 0x02 | TUNNEL | reserved | retired raw TCP relay; refused, do not reuse |
 | 0x03 | TUNNEL_MAP | send | protobuf `TunnelMap` |
 | 0x04 | TUNNEL_HTTP | bidirectional | raw TCP relay (not protobuf) |
 | 0x05 | ROUTE_REQUEST | bidirectional | protobuf `RouteTableRequest` / `RouteTable` |
@@ -34,7 +34,7 @@ Each QUIC connection carries multiple logical streams, distinguished by a 1-byte
 | 0x0c | CONFIG_PUSH | reserved | legacy mesh-plane config stream ID; do not reuse |
 | 0x0d | SUBPROTOCOL | bidirectional | protobuf `MeshSubprotocolOpen`, then subprotocol-owned framing |
 
-Streams 0x02 and 0x04 are raw TCP relay tunnels. They carry llama.cpp RPC and HTTP traffic respectively and are not subject to protobuf framing or generation validation.
+Stream 0x04 is a raw TCP relay tunnel. It carries HTTP traffic and is not subject to protobuf framing or generation validation. Stream 0x02 once carried llama.cpp RPC traffic; a node now refuses it on its own and keeps serving the connection's other streams.
 
 ## Framing
 
@@ -635,7 +635,7 @@ Privacy and safety properties:
 
 The following are explicitly NOT protobuf and are not described here:
 
-- **0x02 / 0x04** — raw TCP relay for llama.cpp RPC and HTTP. No framing changes.
+- **0x04** — raw TCP relay for HTTP. No framing changes. (0x02, the retired llama.cpp RPC relay, is refused.)
 - **Nostr discovery payloads** — remain JSON (NIP-89 kind 31990).
 - **Plugin streams (0x08 / 0x09)** — PLUGIN_CHANNEL and PLUGIN_BULK_TRANSFER; separate protocol, unchanged.
 - **Invite/join token encoding** — unchanged.

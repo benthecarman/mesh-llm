@@ -131,8 +131,6 @@ use operational_logging::{
 use owner_control::*;
 use owner_lifecycle_cache::*;
 use peer_state::*;
-#[cfg(test)]
-use plugin_mesh::*;
 #[expect(
     unused_imports,
     reason = "sibling mesh modules import this parent prelude with `super::*`"

@@ -310,7 +310,6 @@ impl Node {
         self.local_endpoints.insert(endpoint_id);
 
         let (peer_change_tx, peer_change_rx) = watch::channel(0usize);
-        let (tunnel_tx, tunnel_rx) = tokio::sync::mpsc::channel(256);
         let (tunnel_http_tx, tunnel_http_rx) = tokio::sync::mpsc::channel(256);
         let (stage_transport_tx, stage_transport_rx) = tokio::sync::mpsc::channel(256);
         let node = Node {
@@ -358,7 +357,6 @@ impl Node {
             )),
             swarm_capture: Arc::new(std::sync::Mutex::new(None)),
             plugin_frame_telemetry: Arc::new(PluginFrameTelemetry::default()),
-            tunnel_tx,
             tunnel_http_tx,
             stage_transport_tx,
             // No split stages, plugins, or owner control through a membership.
@@ -448,7 +446,6 @@ impl Node {
         Ok((
             node,
             TunnelChannels {
-                rpc: tunnel_rx,
                 http: tunnel_http_rx,
                 stage: stage_transport_rx,
             },

@@ -1825,8 +1825,7 @@ async fn run_auto_inner(
     let (target_tx, target_rx) = tokio::sync::watch::channel(election::ModelTargets::default());
     let target_tx = std::sync::Arc::new(target_tx);
 
-    let tunnel_mgr =
-        tunnel::Manager::start(node.clone(), channels.rpc, channels.http, channels.stage).await?;
+    let tunnel_mgr = tunnel::Manager::start(node.clone(), channels.http, channels.stage).await?;
     // Serving hosts terminate inbound HTTP tunnel streams directly in the
     // shared OpenAI ingress. Client-only nodes remain unreachable as hosts.
     if !is_client {

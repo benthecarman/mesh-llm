@@ -81,10 +81,9 @@ async fn tunnel_from_peer(host: &Node, targets: ModelTargets, opening: &[u8]) ->
     let caller = Box::pin(Node::new_for_tests(NodeRole::Worker))
         .await
         .unwrap();
-    let (legacy_tx, legacy_rx) = tokio::sync::mpsc::channel(1);
     let (http_tx, http_rx) = tokio::sync::mpsc::channel(1);
     let (stage_tx, stage_rx) = tokio::sync::mpsc::channel(1);
-    let tunnels = Manager::start(host.clone(), legacy_rx, http_rx, stage_rx)
+    let tunnels = Manager::start(host.clone(), http_rx, stage_rx)
         .await
         .unwrap();
     let (_targets_tx, targets_rx) = tokio::sync::watch::channel(targets);
@@ -122,7 +121,7 @@ async fn tunnel_from_peer(host: &Node, targets: ModelTargets, opening: &[u8]) ->
     .await;
     connection.close(0u32.into(), b"test complete");
     server_connection.close(0u32.into(), b"test complete");
-    drop((tunnels, legacy_tx, stage_tx));
+    drop((tunnels, stage_tx));
     caller.endpoint.close().await;
     response
 }

@@ -142,10 +142,9 @@ async fn duplicate_host_request(
         let candidates = duplicate_candidates(node.id(), a.id(), b.id(), port, available);
         targets.targets.insert(INTERNAL.to_owned(), candidates);
         let (tx, rx) = watch::channel(targets);
-        let manager =
-            TunnelManager::start(node.clone(), channels.rpc, channels.http, channels.stage)
-                .await
-                .unwrap();
+        let manager = TunnelManager::start(node.clone(), channels.http, channels.stage)
+            .await
+            .unwrap();
         if !unavailable_ingress || node.id() != b.id() {
             manager.set_http_ingress(rx, AffinityRouter::new());
         }
@@ -318,7 +317,7 @@ async fn peer_ingress_executes_registered_plugin_without_mesh_forwarding() {
         vec![election::InferenceTarget::Remote(caller.id())],
     );
     let (_tx, rx) = watch::channel(targets);
-    let tunnel = TunnelManager::start(host.clone(), channels.rpc, channels.http, channels.stage)
+    let tunnel = TunnelManager::start(host.clone(), channels.http, channels.stage)
         .await
         .unwrap();
     tunnel.set_http_ingress(rx, AffinityRouter::new());
@@ -360,7 +359,7 @@ async fn peer_ingress_forwards_document_upload_to_ocr_plugin() {
         .await;
     host.set_plugin_manager(manager).await;
     let (_tx, rx) = watch::channel(election::ModelTargets::default());
-    let tunnel = TunnelManager::start(host.clone(), channels.rpc, channels.http, channels.stage)
+    let tunnel = TunnelManager::start(host.clone(), channels.http, channels.stage)
         .await
         .expect("tunnel");
     tunnel.set_http_ingress(rx, AffinityRouter::new());
@@ -436,14 +435,9 @@ async fn peer_incompatible_local_workload_does_not_discover_capable_remote() {
         vec![election::InferenceTarget::Remote(caller.id())]
     );
     let (_tx, rx) = watch::channel(targets);
-    let manager = TunnelManager::start(
-        receiver.clone(),
-        channels.rpc,
-        channels.http,
-        channels.stage,
-    )
-    .await
-    .unwrap();
+    let manager = TunnelManager::start(receiver.clone(), channels.http, channels.stage)
+        .await
+        .unwrap();
     manager.set_http_ingress(rx, AffinityRouter::new());
     caller.start_accepting();
     receiver.start_accepting();

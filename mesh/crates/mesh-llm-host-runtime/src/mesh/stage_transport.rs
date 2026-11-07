@@ -365,7 +365,6 @@ pub(crate) fn artifact_transfer_allowed_by_topology(
 
 /// Channels returned by Node::start for inbound tunnel streams.
 pub struct TunnelChannels {
-    pub rpc: tokio::sync::mpsc::Receiver<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
     pub http: tokio::sync::mpsc::Receiver<(
         EndpointId,
         iroh::endpoint::SendStream,

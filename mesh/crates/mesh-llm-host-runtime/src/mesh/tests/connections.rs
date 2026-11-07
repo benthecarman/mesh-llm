@@ -363,7 +363,6 @@ async fn make_test_node_with_requirements(
 
     let (peer_change_tx, peer_change_rx) = watch::channel(0usize);
     let (inflight_change_tx, _) = watch::channel(0u64);
-    let (tunnel_tx, _tunnel_rx) = tokio::sync::mpsc::channel(8);
     let (tunnel_http_tx, _tunnel_http_rx) = tokio::sync::mpsc::channel(8);
     let (stage_transport_tx, _stage_transport_rx) = tokio::sync::mpsc::channel(8);
     let runtime_data_producer = crate::runtime_data::RuntimeDataCollector::new().producer(
@@ -436,7 +435,6 @@ async fn make_test_node_with_requirements(
         local_request_metrics: Arc::new(LocalRequestMetricsSampler::default()),
         plugin_frame_telemetry: Arc::new(PluginFrameTelemetry::default()),
         runtime_data_producer,
-        tunnel_tx,
         tunnel_http_tx,
         stage_transport_tx,
         stage_control_tx: Arc::new(Mutex::new(None)),

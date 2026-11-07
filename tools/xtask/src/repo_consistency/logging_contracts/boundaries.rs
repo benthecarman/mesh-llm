@@ -280,7 +280,7 @@ fn logging_boundaries_mesh_connection_responsibilities_have_semantic_owners() {
         &format!("{HOST}/mesh/connections/tunnel.rs"),
         &[
             "dispatch_mesh_stream",
-            "forward_tunnel_stream",
+            "refuse_legacy_tunnel_stream",
             "forward_tunnel_http_stream",
             "_dispatch_streams",
             "authenticated_peer_path",
