@@ -11,8 +11,8 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use skippy_model_ref::{
-    ModelRef, format_canonical_ref, gguf_matches_quant_selector, normalize_gguf_distribution_id,
-    parse_model_ref, split_gguf_shard_info,
+    ModelRef, complete_split_gguf_shard_set, format_canonical_ref, gguf_matches_quant_selector,
+    normalize_gguf_distribution_id, parse_model_ref, split_gguf_shard_info,
 };
 
 #[async_trait]
@@ -149,7 +149,7 @@ pub async fn resolve_model_artifact_with_budget(
             select_primary_file(model_ref.selector.as_deref(), &repo_files)?
         };
     let format = format_for_file(&primary_file.path)?;
-    let files = artifact_file_set(&primary_file.path, &repo_files);
+    let files = artifact_file_set(&primary_file.path, &repo_files)?;
     let distribution_id = distribution_id_for_file(&primary_file.path)?;
 
     Ok(ResolvedModelArtifact {
@@ -175,7 +175,7 @@ pub fn select_primary_artifact_file(
 pub fn artifact_files_for_primary(
     primary_file: &str,
     files: &[ModelArtifactFile],
-) -> Vec<ModelArtifactFile> {
+) -> Result<Vec<ModelArtifactFile>> {
     artifact_file_set(primary_file, files)
 }
 
@@ -218,7 +218,7 @@ fn select_primary_file(
 }
 
 fn select_default_file(files: &[ModelArtifactFile]) -> Result<ModelArtifactFile> {
-    select_ranked_file(files, |_file, lower, basename| {
+    select_ranked_file(files, |file, lower, basename| {
         if basename == "model.safetensors" {
             Some(0)
         } else if is_split_safetensors_first_shard(basename) {
@@ -228,6 +228,11 @@ fn select_default_file(files: &[ModelArtifactFile]) -> Result<ModelArtifactFile>
                 return None;
             }
             if lower.contains("-000") && !lower.contains("-00001-of-") {
+                return None;
+            }
+            if split_gguf_shard_info(&file.path).is_some()
+                && complete_split_gguf_shard_set(&file.path, files, |file| &file.path).is_none()
+            {
                 return None;
             }
             Some(if lower.contains("-00001-of-") { 2 } else { 3 })
@@ -260,32 +265,27 @@ fn select_ranked_file(
         .map(|(_, _, _, file)| file.clone())
 }
 
-fn artifact_file_set(primary_file: &str, files: &[ModelArtifactFile]) -> Vec<ModelArtifactFile> {
-    if let Some(primary) = split_gguf_shard_info(primary_file) {
-        let mut shards = files
-            .iter()
-            .filter(|file| {
-                split_gguf_shard_info(&file.path)
-                    .map(|candidate| {
-                        candidate.prefix == primary.prefix && candidate.total == primary.total
-                    })
-                    .unwrap_or(false)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        shards.sort_by(|left, right| left.path.cmp(&right.path));
-        if !shards.is_empty() {
-            return shards;
-        }
+fn artifact_file_set(
+    primary_file: &str,
+    files: &[ModelArtifactFile],
+) -> Result<Vec<ModelArtifactFile>> {
+    if split_gguf_shard_info(primary_file).is_some() {
+        let shards = complete_split_gguf_shard_set(primary_file, files, |file| &file.path)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "split GGUF shard set for {primary_file} is incomplete or has duplicate parts"
+                )
+            })?;
+        return Ok(shards.into_iter().cloned().collect());
     }
 
-    vec![
+    Ok(vec![
         files
             .iter()
             .find(|file| file.path == primary_file)
             .cloned()
             .unwrap_or_else(|| ModelArtifactFile::new(primary_file)),
-    ]
+    ])
 }
 
 fn format_for_file(file: &str) -> Result<ModelFormat> {
@@ -468,6 +468,33 @@ mod tests {
     }
 
     #[test]
+    fn default_selection_skips_incomplete_split_gguf_sets() {
+        let files = files(&[
+            "BF16/x-BF16-00001-of-00003.gguf",
+            "BF16/x-BF16-00002-of-00003.gguf",
+            "x-Q8_0.gguf",
+        ]);
+
+        let selected = select_primary_artifact_file(None, &files).unwrap();
+
+        assert_eq!(selected.path, "x-Q8_0.gguf");
+    }
+
+    #[tokio::test]
+    async fn incomplete_split_gguf_selector_fails_resolution() {
+        let repository = repo(vec![
+            "UD-IQ2_M/GLM-5.1-UD-IQ2_M-00001-of-00003.gguf",
+            "UD-IQ2_M/GLM-5.1-UD-IQ2_M-00003-of-00003.gguf",
+        ]);
+
+        let error = resolve_model_artifact_ref("org/repo:UD-IQ2_M", &repository)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("incomplete"), "{error:#}");
+    }
+
+    #[test]
     fn public_selector_api_resolves_mesh_split_stem_to_first_part() {
         let files = files(&[
             "zai-org.GLM-5.1.Q2_K-00002-of-00018.gguf",
@@ -583,7 +610,8 @@ mod tests {
         ]);
 
         let shards =
-            artifact_files_for_primary("UD-IQ2_M/GLM-5.1-UD-IQ2_M-00001-of-00003.gguf", &files);
+            artifact_files_for_primary("UD-IQ2_M/GLM-5.1-UD-IQ2_M-00001-of-00003.gguf", &files)
+                .unwrap();
 
         assert_eq!(
             shards

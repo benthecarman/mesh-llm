@@ -2,7 +2,7 @@
 
 use std::cmp::Ordering;
 
-use skippy_model_ref::split_gguf_shard_info;
+use skippy_model_ref::{complete_split_gguf_shard_set, split_gguf_shard_info};
 
 use crate::ModelArtifactFile;
 
@@ -24,20 +24,14 @@ pub fn file_preference_score(file: &str) -> usize {
         .unwrap_or(PREFERRED.len() + 2)
 }
 
+/// Total bytes of the GGUF variant `file`, summed over every shard of a split
+/// GGUF. `None` when a size is unknown, the shard set is incomplete, or the
+/// sum overflows.
 pub fn gguf_variant_size_bytes(file: &str, siblings: &[ModelArtifactFile]) -> Option<u64> {
-    if let Some(primary) = split_gguf_shard_info(file) {
-        let mut total = 0u64;
-        let mut matched = false;
-        for candidate in siblings {
-            let Some(shard) = split_gguf_shard_info(&candidate.path) else {
-                continue;
-            };
-            if shard.prefix == primary.prefix && shard.total == primary.total {
-                matched = true;
-                total = total.checked_add(candidate.size_bytes?)?;
-            }
-        }
-        return matched.then_some(total);
+    if split_gguf_shard_info(file).is_some() {
+        return complete_split_gguf_shard_set(file, siblings, |candidate| &candidate.path)?
+            .into_iter()
+            .try_fold(0u64, |total, shard| total.checked_add(shard.size_bytes?));
     }
     siblings
         .iter()
@@ -100,7 +94,11 @@ pub fn select_default_gguf_file(
             let lower = basename.to_ascii_lowercase();
             lower.ends_with(".gguf")
                 && !lower.starts_with("mmproj")
-                && split_gguf_shard_info(&file.path).is_none_or(|shard| shard.part == "00001")
+                && split_gguf_shard_info(&file.path).is_none_or(|shard| {
+                    shard.part == "00001"
+                        && complete_split_gguf_shard_set(&file.path, files, |file| &file.path)
+                            .is_some()
+                })
         })
         .map(|file| (file.clone(), gguf_variant_size_bytes(&file.path, files)))
         .collect::<Vec<_>>();
@@ -151,6 +149,60 @@ mod tests {
         assert_eq!(
             select_default_gguf_file(&files, 0).unwrap().path,
             "model-Q4_K_M.gguf"
+        );
+    }
+
+    fn sized(path: &str, size_bytes: u64) -> ModelArtifactFile {
+        ModelArtifactFile {
+            path: path.into(),
+            size_bytes: Some(size_bytes),
+            sha256: None,
+        }
+    }
+
+    #[test]
+    fn split_variant_size_requires_every_shard() {
+        let complete = [
+            sized("Q4/model-00001-of-00002.gguf", 3),
+            sized("Q4/model-00002-of-00002.gguf", 4),
+        ];
+        assert_eq!(
+            gguf_variant_size_bytes("Q4/model-00001-of-00002.gguf", &complete),
+            Some(7)
+        );
+
+        let incomplete = [
+            sized("Q4/model-00001-of-00003.gguf", 3),
+            sized("Q4/model-00003-of-00003.gguf", 4),
+        ];
+        assert_eq!(
+            gguf_variant_size_bytes("Q4/model-00001-of-00003.gguf", &incomplete),
+            None
+        );
+    }
+
+    #[test]
+    fn split_variant_size_rejects_overflowing_shard_sizes() {
+        let files = [
+            sized("model-00001-of-00002.gguf", u64::MAX),
+            sized("model-00002-of-00002.gguf", 1),
+        ];
+        assert_eq!(
+            gguf_variant_size_bytes("model-00001-of-00002.gguf", &files),
+            None
+        );
+    }
+
+    #[test]
+    fn default_selection_skips_incomplete_split_sets() {
+        let files = [
+            sized("BF16/model-BF16-00001-of-00003.gguf", 1),
+            sized("BF16/model-BF16-00002-of-00003.gguf", 1),
+            sized("model-Q8_0.gguf", 8),
+        ];
+        assert_eq!(
+            select_default_gguf_file(&files, 0).unwrap().path,
+            "model-Q8_0.gguf"
         );
     }
 }

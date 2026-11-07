@@ -715,7 +715,7 @@ impl HFBucket {
         for f in &files {
             match entry_map.get(&f.remote) {
                 Some(BucketTreeEntry::File { xet_hash, size, .. }) => {
-                    total_bytes += size;
+                    total_bytes = checked_total_bytes(total_bytes, *size)?;
                     xet_batch_files.push(crate::xet::XetBatchFile {
                         hash: xet_hash.clone(),
                         file_size: *size,
@@ -1375,9 +1375,23 @@ impl crate::blocking::HFBucketSync {
     }
 }
 
+/// Adds one remote entry size to a download total. The sizes come from the
+/// server, so a sum past `u64::MAX` is a malformed listing, not a real transfer.
+fn checked_total_bytes(total: u64, size: u64) -> HFResult<u64> {
+    total
+        .checked_add(size)
+        .ok_or_else(|| HFError::malformed_response("bucket file sizes overflow u64"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BucketCopyFile, BucketCopySourceType, HFBucket};
+    use super::{BucketCopyFile, BucketCopySourceType, HFBucket, checked_total_bytes};
+
+    #[test]
+    fn remote_size_totals_reject_overflow() {
+        assert_eq!(checked_total_bytes(2, 3).unwrap(), 5);
+        assert!(checked_total_bytes(u64::MAX, 1).is_err());
+    }
 
     #[test]
     fn test_bucket_accessors() {

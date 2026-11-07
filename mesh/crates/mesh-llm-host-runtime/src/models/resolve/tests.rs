@@ -1118,11 +1118,11 @@ fn collect_show_gguf_variants_excludes_mmproj_and_nonfirst_split() {
     let siblings = vec![
         ("mmproj-BF16.gguf".to_string(), Some(1_200_000_000)),
         (
-            "gemma-4-26B-A4B-it-UD-Q3_K_S-00002-of-00009.gguf".to_string(),
+            "gemma-4-26B-A4B-it-UD-Q3_K_S-00002-of-00002.gguf".to_string(),
             Some(12_500_000_000),
         ),
         (
-            "gemma-4-26B-A4B-it-UD-Q3_K_S-00001-of-00009.gguf".to_string(),
+            "gemma-4-26B-A4B-it-UD-Q3_K_S-00001-of-00002.gguf".to_string(),
             Some(12_500_000_000),
         ),
         (
@@ -1137,7 +1137,7 @@ fn collect_show_gguf_variants_excludes_mmproj_and_nonfirst_split() {
     assert_eq!(
         files,
         vec![
-            "gemma-4-26B-A4B-it-UD-Q3_K_S-00001-of-00009.gguf".to_string(),
+            "gemma-4-26B-A4B-it-UD-Q3_K_S-00001-of-00002.gguf".to_string(),
             "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf".to_string(),
         ]
     );
@@ -1147,6 +1147,28 @@ fn collect_show_gguf_variants_excludes_mmproj_and_nonfirst_split() {
 fn collect_show_gguf_variants_uses_total_split_size() {
     let siblings = vec![
         (
+            "IQ3_K/Kimi-K2.6-IQ3_K-00001-of-00003.gguf".to_string(),
+            Some(6_912_800),
+        ),
+        (
+            "IQ3_K/Kimi-K2.6-IQ3_K-00002-of-00003.gguf".to_string(),
+            Some(45_004_320_032),
+        ),
+        (
+            "IQ3_K/Kimi-K2.6-IQ3_K-00003-of-00003.gguf".to_string(),
+            Some(45_669_680_480),
+        ),
+    ];
+    let variants = collect_show_gguf_variants_from_siblings(&siblings, 0);
+    assert_eq!(variants.len(), 1);
+    assert_eq!(variants[0].0, "IQ3_K/Kimi-K2.6-IQ3_K-00001-of-00003.gguf");
+    assert_eq!(variants[0].1, Some(90_680_913_312));
+}
+
+#[test]
+fn collect_show_gguf_variants_omits_incomplete_split_sets() {
+    let siblings = vec![
+        (
             "IQ3_K/Kimi-K2.6-IQ3_K-00001-of-00012.gguf".to_string(),
             Some(6_912_800),
         ),
@@ -1154,15 +1176,13 @@ fn collect_show_gguf_variants_uses_total_split_size() {
             "IQ3_K/Kimi-K2.6-IQ3_K-00002-of-00012.gguf".to_string(),
             Some(45_004_320_032),
         ),
-        (
-            "IQ3_K/Kimi-K2.6-IQ3_K-00003-of-00012.gguf".to_string(),
-            Some(45_669_680_480),
-        ),
+        ("Kimi-K2.6-Q4_K_M.gguf".to_string(), Some(16_900_000_000)),
     ];
     let variants = collect_show_gguf_variants_from_siblings(&siblings, 0);
-    assert_eq!(variants.len(), 1);
-    assert_eq!(variants[0].0, "IQ3_K/Kimi-K2.6-IQ3_K-00001-of-00012.gguf");
-    assert_eq!(variants[0].1, Some(90_680_913_312));
+    assert_eq!(
+        variants,
+        vec![("Kimi-K2.6-Q4_K_M.gguf".to_string(), Some(16_900_000_000))]
+    );
 }
 
 #[test]

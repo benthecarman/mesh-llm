@@ -947,7 +947,10 @@ impl<T: RepoType> HFRepository<T> {
             .flatten()
             .collect();
 
-        let total_bytes: u64 = file_metas.iter().map(|m| m.file_size).sum();
+        let total_bytes = file_metas
+            .iter()
+            .try_fold(0u64, |total, meta| total.checked_add(meta.file_size))
+            .ok_or_else(|| HFError::malformed_response("snapshot file sizes overflow u64"))?;
         params.progress.emit(DownloadEvent::Start {
             total_files,
             total_bytes,

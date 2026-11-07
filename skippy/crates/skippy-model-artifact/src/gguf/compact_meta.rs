@@ -86,6 +86,11 @@ fn read_architecture(reader: &mut GgufReader, n_kv: usize) -> Option<String> {
     None
 }
 
+/// llama.cpp's `LLAMA_MAX_LAYERS`: the runtime refuses any model with more
+/// blocks. `block_count` sizes per-layer vectors during topology planning, so
+/// a larger value is malformed metadata rather than a model to price.
+const MAX_GGUF_BLOCK_COUNT: u32 = 512;
+
 fn read_structural_field(
     reader: &mut GgufReader,
     value_type: GgufType,
@@ -117,6 +122,9 @@ fn read_structural_field(
     };
     if let Some(destination) = scalar {
         if let Some(value) = read_gguf_value_as_u32(reader, value_type).ok()? {
+            if field == "block_count" && value > MAX_GGUF_BLOCK_COUNT {
+                return None;
+            }
             *destination = value;
         }
         return Some(());
@@ -277,6 +285,19 @@ mod tests {
                 assert_eq!(meta.value_length, 64);
             }
         }
+    }
+
+    #[test]
+    fn block_count_above_runtime_layer_limit_is_rejected() {
+        let at_limit =
+            metadata(&[("future.block_count", MAX_GGUF_BLOCK_COUNT)], Some(true)).unwrap();
+        assert_eq!(at_limit.layer_count, MAX_GGUF_BLOCK_COUNT);
+
+        for block_count in [MAX_GGUF_BLOCK_COUNT + 1, u32::MAX] {
+            assert!(metadata(&[("future.block_count", block_count)], Some(true)).is_none());
+        }
+        // Another namespace's block count is skipped, not admitted or rejected.
+        assert!(metadata(&[("clip.block_count", u32::MAX)], Some(true)).is_some());
     }
 
     #[test]

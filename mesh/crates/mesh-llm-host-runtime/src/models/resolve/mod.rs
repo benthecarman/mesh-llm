@@ -727,7 +727,15 @@ fn collect_show_gguf_variants_from_siblings(
             if is_known_gguf_sidecar(file) {
                 return None;
             }
-            if split_gguf_shard_info(file).is_some() && !is_split_gguf_first_shard(file) {
+            if split_gguf_shard_info(file).is_some()
+                && (!is_split_gguf_first_shard(file)
+                    || skippy_model_ref::complete_split_gguf_shard_set(
+                        file,
+                        siblings,
+                        |(path, _)| path,
+                    )
+                    .is_none())
+            {
                 return None;
             }
             Some((

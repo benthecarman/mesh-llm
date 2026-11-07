@@ -6,8 +6,8 @@ use hf_hub::HFClient;
 use hf_hub::repository::RepoTreeEntry;
 use serde::Serialize;
 use skippy_model_ref::{
-    gguf_matches_quant_selector, normalize_gguf_distribution_id, quant_selector_from_gguf_file,
-    split_gguf_shard_info,
+    complete_split_gguf_shard_set, gguf_matches_quant_selector, normalize_gguf_distribution_id,
+    quant_selector_from_gguf_file, split_gguf_shard_info,
 };
 
 use crate::jobs::{CpuJobPlan, JobSpec, JobVolume};
@@ -150,24 +150,38 @@ pub fn discover_quants_from_gguf_files(gguf_files: Vec<(String, u64)>) -> Vec<Di
 
     let mut quants: Vec<DiscoveredQuant> = quant_map
         .into_iter()
-        .map(|(name, mut files)| {
-            // Sort so shard -00001 comes first.
-            files.sort_by(|a, b| a.0.cmp(&b.0));
-            let total_bytes = files.iter().map(|(_, size)| size).sum();
-            let shard_count = files.len();
-            let first_file = files[0].0.clone();
-            DiscoveredQuant {
-                name,
-                shard_count,
-                total_bytes,
-                first_file,
-            }
-        })
+        .filter_map(|(name, files)| discovered_quant(name, files))
         .collect();
 
     // Sort by name for stable output.
     quants.sort_by(|a, b| a.name.cmp(&b.name));
     quants
+}
+
+/// One quant variant, or `None` when it cannot be packaged: a split GGUF
+/// missing a part, mixing shard sets or plain files, or whose sizes overflow.
+fn discovered_quant(name: String, mut files: Vec<(String, u64)>) -> Option<DiscoveredQuant> {
+    // Sort so shard -00001 comes first.
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let first_file = files.first()?.0.clone();
+    if files
+        .iter()
+        .any(|(path, _)| split_gguf_shard_info(path).is_some())
+    {
+        let shards = complete_split_gguf_shard_set(&first_file, &files, |(path, _)| path)?;
+        if shards.len() != files.len() {
+            return None;
+        }
+    }
+    let total_bytes = files
+        .iter()
+        .try_fold(0u64, |total, (_, size)| total.checked_add(*size))?;
+    Some(DiscoveredQuant {
+        name,
+        shard_count: files.len(),
+        total_bytes,
+        first_file,
+    })
 }
 
 /// Resolve source files, permissions, target repo, and build the job spec.
@@ -228,20 +242,9 @@ pub async fn resolve(
             )
         })?;
 
-    // For sharded models, ensure we have the first shard.
-    let source_file = if let Some(shard) = split_gguf_shard_info(&matched.first_file) {
-        // Verify it's shard 00001.
-        if shard.part != "00001" {
-            // Reconstruct the -00001- path.
-            matched
-                .first_file
-                .replace(&format!("-{}-of-", shard.part), "-00001-of-")
-        } else {
-            matched.first_file.clone()
-        }
-    } else {
-        matched.first_file.clone()
-    };
+    // Discovery only admits complete shard sets, so a split quant's first
+    // file is always shard 00001.
+    let source_file = matched.first_file.clone();
 
     // Derive distribution ID and target repo.
     let dist_id =
@@ -438,6 +441,46 @@ mod tests {
     }
 
     #[test]
+    fn omits_incomplete_or_mixed_split_quants() {
+        let quants = discover_quants_from_gguf_files(vec![
+            // Missing part 2 of 3, and no part 1 at all.
+            ("Q4_K_M/model-Q4_K_M-00001-of-00003.gguf".to_string(), 1),
+            ("Q4_K_M/model-Q4_K_M-00003-of-00003.gguf".to_string(), 1),
+            ("Q8_0/model-Q8_0-00002-of-00002.gguf".to_string(), 1),
+            // A shard set mixed with a plain file of the same selector.
+            ("Q6_K/model-Q6_K-00001-of-00001.gguf".to_string(), 1),
+            ("model-Q6_K.gguf".to_string(), 1),
+            // The same, with the plain file sorting first.
+            ("a-Q3_K_M.gguf".to_string(), 1),
+            ("b/model-Q3_K_M-00001-of-00001.gguf".to_string(), 1),
+            // Complete set.
+            ("Q5_K_M/model-Q5_K_M-00002-of-00002.gguf".to_string(), 2),
+            ("Q5_K_M/model-Q5_K_M-00001-of-00002.gguf".to_string(), 3),
+        ]);
+
+        assert_eq!(quants.len(), 1, "{quants:?}");
+        assert_eq!(quants[0].name, "Q5_K_M");
+        assert_eq!(quants[0].shard_count, 2);
+        assert_eq!(quants[0].total_bytes, 5);
+        assert!(quants[0].first_file.ends_with("00001-of-00002.gguf"));
+    }
+
+    #[test]
+    fn omits_quants_whose_sizes_overflow() {
+        let quants = discover_quants_from_gguf_files(vec![
+            ("model-Q4_K_M-00001-of-00002.gguf".to_string(), u64::MAX),
+            ("model-Q4_K_M-00002-of-00002.gguf".to_string(), 1),
+            ("model-Q8_0.gguf".to_string(), u64::MAX),
+        ]);
+
+        let names = quants
+            .iter()
+            .map(|quant| quant.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["Q8_0"]);
+    }
+
+    #[test]
     fn groups_root_quant_files_by_selector() {
         let quants = discover_quants_from_gguf_files(vec![
             ("Qwen3-8B-Q4_K_M.gguf".to_string(), 5),
@@ -455,14 +498,19 @@ mod tests {
     fn separates_multimodal_projectors_from_model_quants() {
         let inventory = discover_inventory_from_gguf_files(vec![
             (
-                "UD-Q2_K_XL/Inkling-UD-Q2_K_XL-00001-of-00008.gguf".to_string(),
+                "UD-Q2_K_XL/Inkling-UD-Q2_K_XL-00001-of-00002.gguf".to_string(),
                 317,
+            ),
+            (
+                "UD-Q2_K_XL/Inkling-UD-Q2_K_XL-00002-of-00002.gguf".to_string(),
+                100,
             ),
             ("mmproj-BF16.gguf".to_string(), 183),
         ]);
 
         assert_eq!(inventory.quants.len(), 1);
         assert_eq!(inventory.quants[0].name, "UD-Q2_K_XL");
+        assert_eq!(inventory.quants[0].total_bytes, 417);
         assert_eq!(
             inventory.projectors,
             vec![DiscoveredProjector {

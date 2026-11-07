@@ -727,22 +727,28 @@ mod tests {
     fn size_label_from_sibling_entries_sums_split_variant_sizes() {
         let siblings = vec![
             (
-                "IQ3_K/Kimi-K2.6-IQ3_K-00001-of-00012.gguf".to_string(),
+                "IQ3_K/Kimi-K2.6-IQ3_K-00001-of-00003.gguf".to_string(),
                 Some(6_912_800),
             ),
             (
-                "IQ3_K/Kimi-K2.6-IQ3_K-00002-of-00012.gguf".to_string(),
+                "IQ3_K/Kimi-K2.6-IQ3_K-00002-of-00003.gguf".to_string(),
                 Some(45_004_320_032),
             ),
             (
-                "IQ3_K/Kimi-K2.6-IQ3_K-00003-of-00012.gguf".to_string(),
+                "IQ3_K/Kimi-K2.6-IQ3_K-00003-of-00003.gguf".to_string(),
                 Some(45_669_680_480),
             ),
         ];
         assert_eq!(
-            size_label_from_sibling_entries("IQ3_K/Kimi-K2.6-IQ3_K-00001-of-00012.gguf", &siblings)
+            size_label_from_sibling_entries("IQ3_K/Kimi-K2.6-IQ3_K-00001-of-00003.gguf", &siblings)
                 .as_deref(),
             Some("90.7GB")
+        );
+
+        let partial = &siblings[..2];
+        assert_eq!(
+            size_label_from_sibling_entries("IQ3_K/Kimi-K2.6-IQ3_K-00001-of-00003.gguf", partial),
+            None
         );
     }
 

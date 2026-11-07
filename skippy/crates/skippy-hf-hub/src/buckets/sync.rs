@@ -131,7 +131,8 @@ impl BucketSyncPlan {
             .count()
     }
 
-    /// Total bytes to transfer (upload + download operations).
+    /// Total bytes to transfer (upload + download operations), saturating at
+    /// `u64::MAX` because remote listing sizes are untrusted.
     pub fn transfer_bytes(&self) -> u64 {
         self.operations
             .iter()
@@ -139,7 +140,7 @@ impl BucketSyncPlan {
                 op.action == BucketSyncAction::Upload || op.action == BucketSyncAction::Download
             })
             .filter_map(|op| op.size)
-            .sum()
+            .fold(0, u64::saturating_add)
     }
 }
 
@@ -697,7 +698,7 @@ impl HFBucket {
                         Some(prefix) => format!("{prefix}/{}", op.path),
                         None => op.path.clone(),
                     };
-                    total_bytes += size;
+                    total_bytes = super::checked_total_bytes(total_bytes, *size)?;
                     xet_batch_files.push(crate::xet::XetBatchFile {
                         hash: xet_hash.clone(),
                         file_size: *size,
@@ -1009,6 +1010,15 @@ mod tests {
             (BucketSyncAction::Skip, None),
         ]);
         assert_eq!(plan.transfer_bytes(), 400);
+    }
+
+    #[test]
+    fn transfer_bytes_saturates_on_untrusted_sizes() {
+        let plan = make_plan(vec![
+            (BucketSyncAction::Download, Some(u64::MAX)),
+            (BucketSyncAction::Download, Some(1)),
+        ]);
+        assert_eq!(plan.transfer_bytes(), u64::MAX);
     }
 
     #[test]

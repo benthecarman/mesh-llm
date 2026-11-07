@@ -191,6 +191,47 @@ pub struct SplitGgufShard<'a> {
     pub total: &'a str,
 }
 
+/// The complete split-GGUF shard set that `primary` belongs to, in part order.
+///
+/// Returns `None` when `primary` is not a split-GGUF shard, when any part
+/// `1..=total` of its set is missing from `candidates`, or when a part appears
+/// more than once. Candidates from other shard sets are ignored. A partial set
+/// cannot be loaded, so callers must not size, download or plan from one.
+pub fn complete_split_gguf_shard_set<'a, T>(
+    primary: &str,
+    candidates: &'a [T],
+    path: impl Fn(&T) -> &str,
+) -> Option<Vec<&'a T>> {
+    let primary = split_gguf_shard_info(primary)?;
+    let total = usize::try_from(primary.total.parse::<u32>().ok()?).ok()?;
+    if total == 0 {
+        return None;
+    }
+    let mut parts: Vec<Option<&T>> = Vec::new();
+    for candidate in candidates {
+        let Some(shard) = split_gguf_shard_info(path(candidate)) else {
+            continue;
+        };
+        if shard.prefix != primary.prefix || shard.total != primary.total {
+            continue;
+        }
+        let part = usize::try_from(shard.part.parse::<u32>().ok()?).ok()?;
+        if part == 0 || part > total {
+            return None;
+        }
+        if parts.is_empty() {
+            parts.resize(total, None);
+        }
+        if parts[part - 1].replace(candidate).is_some() {
+            return None;
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.into_iter().collect()
+}
+
 fn split_gguf_shard_stem_prefix(stem: &str) -> Option<&str> {
     let (prefix_and_part, total) = stem.rsplit_once("-of-")?;
     if total.len() != 5 || !total.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -462,5 +503,50 @@ mod tests {
             })
         );
         assert_eq!(split_gguf_shard_info("Qwen3-30B-A3B-Q4_K_M.gguf"), None);
+    }
+
+    fn shard_set<'a>(primary: &str, paths: &'a [&'a str]) -> Option<Vec<&'a str>> {
+        complete_split_gguf_shard_set(primary, paths, |path| path)
+            .map(|shards| shards.into_iter().copied().collect())
+    }
+
+    #[test]
+    fn complete_split_gguf_shard_set_returns_every_part_in_order() {
+        let paths = [
+            "Q4/model-00003-of-00003.gguf",
+            "Q2/model-00001-of-00001.gguf",
+            "Q4/model-00001-of-00003.gguf",
+            "Q4/model-00002-of-00003.gguf",
+            "Q4/model-00001-of-00002.gguf",
+        ];
+        assert_eq!(
+            shard_set("Q4/model-00001-of-00003.gguf", &paths),
+            Some(vec![
+                "Q4/model-00001-of-00003.gguf",
+                "Q4/model-00002-of-00003.gguf",
+                "Q4/model-00003-of-00003.gguf",
+            ])
+        );
+    }
+
+    #[test]
+    fn complete_split_gguf_shard_set_rejects_incomplete_or_malformed_sets() {
+        let missing = ["model-00001-of-00003.gguf", "model-00003-of-00003.gguf"];
+        assert_eq!(shard_set("model-00001-of-00003.gguf", &missing), None);
+
+        let duplicate = [
+            "model-00001-of-00002.gguf",
+            "model-00001-of-00002.gguf",
+            "model-00002-of-00002.gguf",
+        ];
+        assert_eq!(shard_set("model-00001-of-00002.gguf", &duplicate), None);
+
+        let out_of_range = ["model-00001-of-00001.gguf", "model-00002-of-00001.gguf"];
+        assert_eq!(shard_set("model-00001-of-00001.gguf", &out_of_range), None);
+
+        let zero_total = ["model-00000-of-00000.gguf"];
+        assert_eq!(shard_set("model-00000-of-00000.gguf", &zero_total), None);
+
+        assert_eq!(shard_set("model.gguf", &["model.gguf"]), None);
     }
 }
