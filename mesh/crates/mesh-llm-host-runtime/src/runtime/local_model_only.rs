@@ -283,6 +283,7 @@ async fn run_local_model_only_inner(
         pinned_gpu: model.pinned_gpu.as_ref(),
         device_override: startup_device_override(model.gpu_id.as_deref()),
         capacity_budget_bytes: local_capacity_bytes,
+        capacity_reservation: None,
         cache_type_k_override: model.cache_type_k.as_deref(),
         cache_type_v_override: model.cache_type_v.as_deref(),
         n_batch_override: model.n_batch,

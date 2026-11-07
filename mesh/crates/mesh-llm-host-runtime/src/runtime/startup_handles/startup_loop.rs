@@ -269,6 +269,7 @@ pub(in crate::runtime) async fn startup_handle_local_fallback_event(
             pinned_gpu: ctx.pinned_gpu,
             device_override: ctx.device_override.map(str::to_string),
             capacity_budget_bytes: Some(reservation.capacity_budget_bytes()),
+            capacity_reservation: Some(&reservation),
             cache_type_k_override: ctx.cache_type_k,
             cache_type_v_override: ctx.cache_type_v,
             n_batch_override: ctx.n_batch,

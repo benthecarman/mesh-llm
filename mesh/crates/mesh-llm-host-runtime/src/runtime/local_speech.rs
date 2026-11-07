@@ -80,6 +80,9 @@ pub(super) async fn start_local_speech_model(
         format_gb(state_bytes),
         format_gb(spec.capacity_budget_bytes)
     );
+    if let Some(reservation) = spec.capacity_reservation {
+        reservation.grow_to(required)?;
+    }
     emit_memory_plan_resolved(
         &model_name,
         Some(&RuntimeResourcePlanBreakdown {

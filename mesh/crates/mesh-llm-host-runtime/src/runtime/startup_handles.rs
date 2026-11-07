@@ -363,7 +363,7 @@ where
     F: Fn() -> survey::SurveyModelSpec<'a>,
 {
     let StartupLocalRuntimeOnceParams {
-        mut make_start_spec,
+        make_start_spec,
         runtime_capacity_ledger,
         instance_id,
         model_name,
@@ -416,7 +416,11 @@ where
         }
     };
 
-    make_start_spec.capacity_budget_bytes = Some(reservation.capacity_budget_bytes());
+    let make_start_spec = LocalRuntimeModelStartSpec {
+        capacity_budget_bytes: Some(reservation.capacity_budget_bytes()),
+        capacity_reservation: Some(&reservation),
+        ..make_start_spec
+    };
     // Startup-time loads have no `LoadOperation` reservation of their own
     // (event-system-fixes deferral D2 scopes `ModelLoadProgress` to the
     // runtime-load path via `LoadOperation::progress_ingress`) -- degrade
@@ -808,6 +812,7 @@ pub(super) async fn startup_launch_runtime(
         pinned_gpu,
         device_override: device_override.clone(),
         capacity_budget_bytes: None,
+        capacity_reservation: None,
         cache_type_k_override: cache_type_k,
         cache_type_v_override: cache_type_v,
         n_batch_override: n_batch,

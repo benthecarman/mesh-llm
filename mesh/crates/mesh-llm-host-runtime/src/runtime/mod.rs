@@ -22,6 +22,7 @@ mod local_laya;
 mod local_memory_plan;
 mod local_model_only;
 mod local_package;
+mod local_plan_admission;
 mod local_speech;
 mod local_split;
 mod memberships;

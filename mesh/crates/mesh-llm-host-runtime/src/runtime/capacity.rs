@@ -118,15 +118,7 @@ impl RuntimeCapacityLedger {
         request: RuntimeCapacityRequest,
     ) -> Result<RuntimeCapacityReservation, RuntimeCapacityError> {
         let mut state = self.inner.lock().expect("runtime capacity ledger poisoned");
-        let reserved_bytes = state
-            .reservations
-            .iter()
-            .filter(|(instance_id, allocation)| {
-                instance_id.as_str() != request.instance_id
-                    && allocation.pool.overlaps(&request.pool)
-            })
-            .map(|(_, allocation)| allocation.required_bytes)
-            .fold(0_u64, u64::saturating_add);
+        let reserved_bytes = state.reserved_bytes_excluding(&request.instance_id, &request.pool);
 
         if reserved_bytes.saturating_add(request.required_bytes) > request.capacity_bytes {
             return Err(RuntimeCapacityError {
@@ -183,10 +175,62 @@ impl RuntimeCapacityLedger {
     }
 }
 
+impl RuntimeCapacityLedgerState {
+    /// Bytes held by every other instance whose pool overlaps `pool`.
+    fn reserved_bytes_excluding(&self, instance_id: &str, pool: &RuntimeCapacityPool) -> u64 {
+        self.reservations
+            .iter()
+            .filter(|(other_id, allocation)| {
+                other_id.as_str() != instance_id && allocation.pool.overlaps(pool)
+            })
+            .map(|(_, allocation)| allocation.required_bytes)
+            .fold(0_u64, u64::saturating_add)
+    }
+}
+
 impl RuntimeCapacityReservation {
     pub(super) fn capacity_budget_bytes(&self) -> u64 {
         self.capacity_bytes
             .saturating_sub(self.reserved_bytes_excluding_self)
+    }
+
+    /// Raises this reservation to `required_bytes` once the load's memory plan
+    /// is known, so the ledger holds the planned KV cache and draft as well as
+    /// the weights it was admitted with. Never shrinks the reservation. Fails,
+    /// leaving the reservation unchanged, when other instances reserved the
+    /// room since admission. A reservation already replaced by a newer one for
+    /// the same instance is left alone.
+    pub(super) fn grow_to(&self, required_bytes: u64) -> Result<(), RuntimeCapacityError> {
+        let mut state = self
+            .ledger
+            .inner
+            .lock()
+            .expect("runtime capacity ledger poisoned");
+        let Some(allocation) = state
+            .reservations
+            .get(&self.instance_id)
+            .filter(|allocation| allocation.generation == self.generation)
+        else {
+            return Ok(());
+        };
+        if required_bytes <= allocation.required_bytes {
+            return Ok(());
+        }
+        let pool = allocation.pool.clone();
+        let reserved_bytes = state.reserved_bytes_excluding(&self.instance_id, &pool);
+        if reserved_bytes.saturating_add(required_bytes) > self.capacity_bytes {
+            return Err(RuntimeCapacityError {
+                model_name: allocation.model_name.clone(),
+                pool,
+                capacity_bytes: self.capacity_bytes,
+                reserved_bytes,
+                required_bytes,
+            });
+        }
+        if let Some(allocation) = state.reservations.get_mut(&self.instance_id) {
+            allocation.required_bytes = required_bytes;
+        }
+        Ok(())
     }
 }
 
@@ -571,6 +615,75 @@ mod tests {
         assert_eq!(error.capacity_bytes, 800);
         assert_eq!(error.reserved_bytes, 0);
         assert_eq!(error.required_bytes, runtime_model_required_bytes(900));
+    }
+
+    #[test]
+    fn grown_reservation_holds_planned_bytes_against_later_loads() {
+        let ledger = RuntimeCapacityLedger::default();
+        let first = ledger
+            .reserve(request("runtime-1", "Qwen", 300))
+            .expect("weights should be admitted");
+        first
+            .grow_to(800)
+            .expect("the plan fits the budget the first load was given");
+        assert_eq!(ledger.used_bytes(&RuntimeCapacityPool::Node), 800);
+
+        let err = ledger
+            .reserve(request("runtime-2", "Qwen", 300))
+            .expect_err("a second load must see the first load's KV cache");
+        assert_eq!(err.reserved_bytes, 800);
+
+        drop(first);
+        assert_eq!(ledger.used_bytes(&RuntimeCapacityPool::Node), 0);
+    }
+
+    #[test]
+    fn reservation_growth_never_shrinks() {
+        let ledger = RuntimeCapacityLedger::default();
+        let reservation = ledger
+            .reserve(request("runtime-1", "Qwen", 300))
+            .expect("weights should be admitted");
+        reservation
+            .grow_to(200)
+            .expect("a smaller plan keeps the admission reservation");
+        assert_eq!(ledger.used_bytes(&RuntimeCapacityPool::Node), 300);
+    }
+
+    #[test]
+    fn reservation_growth_fails_when_room_was_taken_since_admission() {
+        let ledger = RuntimeCapacityLedger::default();
+        let first = ledger
+            .reserve(request("runtime-1", "Qwen", 300))
+            .expect("first weights should be admitted");
+        let _second = ledger
+            .reserve(request("runtime-2", "Qwen", 400))
+            .expect("second weights should be admitted");
+
+        let err = first
+            .grow_to(700)
+            .expect_err("growth must not overcommit the pool");
+        assert_eq!(err.reserved_bytes, 400);
+        assert_eq!(err.required_bytes, 700);
+        assert_eq!(err.shortfall_bytes(), 100);
+        assert_eq!(
+            ledger.used_bytes(&RuntimeCapacityPool::Node),
+            700,
+            "a failed growth leaves the admission reservation in place"
+        );
+    }
+
+    #[test]
+    fn stale_reservation_growth_leaves_the_replacement_alone() {
+        let ledger = RuntimeCapacityLedger::default();
+        let stale = ledger
+            .reserve(request("runtime-1", "Qwen", 300))
+            .expect("initial reservation should succeed");
+        let _replacement = ledger
+            .reserve(request("runtime-1", "Qwen", 400))
+            .expect("replacement should succeed");
+
+        stale.grow_to(900).expect("stale growth is a no-op");
+        assert_eq!(ledger.used_bytes(&RuntimeCapacityPool::Node), 400);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use super::capacity::runtime_model_required_bytes;
+use super::capacity::{RuntimeCapacityReservation, runtime_model_required_bytes};
 use super::context_planning::{
     RuntimeResourcePlan, RuntimeResourcePlanInput, RuntimeResourcePlanningProfile,
 };
@@ -8,6 +8,7 @@ use super::local_memory_plan::{
     MemoryPlanMeasurementKey, MemoryPlanStartPath, emit_measured_memory_reconciliation,
     emit_memory_plan_resolved, measured_buffers_footprint,
 };
+use super::local_plan_admission::{admit_local_plan, ensure_parallel_within_cap};
 use super::split_planning::format_gb;
 use crate::api;
 use crate::inference::{election, skippy};
@@ -271,6 +272,8 @@ pub(super) struct LocalRuntimeModelStartSpec<'a> {
     pub(super) pinned_gpu: Option<&'a crate::runtime::StartupPinnedGpuTarget>,
     pub(super) device_override: Option<String>,
     pub(super) capacity_budget_bytes: Option<u64>,
+    /// Ledger reservation the memory plan grows to its planned footprint.
+    pub(super) capacity_reservation: Option<&'a RuntimeCapacityReservation>,
     pub(super) cache_type_k_override: Option<&'a str>,
     pub(super) cache_type_v_override: Option<&'a str>,
     pub(super) n_batch_override: Option<u32>,
@@ -297,6 +300,8 @@ pub(super) struct LocalOpenAiModelStartSpec<'a> {
     pub(super) pinned_gpu: Option<&'a crate::runtime::StartupPinnedGpuTarget>,
     pub(super) device_override: Option<String>,
     pub(super) capacity_budget_bytes: u64,
+    /// Ledger reservation the memory plan grows to its planned footprint.
+    pub(super) capacity_reservation: Option<&'a RuntimeCapacityReservation>,
     pub(super) cache_type_k_override: Option<&'a str>,
     pub(super) cache_type_v_override: Option<&'a str>,
     pub(super) n_batch_override: Option<u32>,
@@ -860,6 +865,7 @@ pub(super) async fn start_runtime_local_model(
             pinned_gpu: spec.pinned_gpu,
             device_override: spec.device_override,
             capacity_budget_bytes: local_capacity_bytes,
+            capacity_reservation: spec.capacity_reservation,
             cache_type_k_override: spec.cache_type_k_override,
             cache_type_v_override: spec.cache_type_v_override,
             n_batch_override: spec.n_batch_override,
@@ -1099,6 +1105,7 @@ pub(super) async fn start_local_openai_model(
         spec.flash_attention_override,
     ));
 
+    ensure_parallel_within_cap(spec.parallel_override)?;
     let plan_input = RuntimeResourcePlanInput {
         ctx_size_override: spec.ctx_size_override,
         parallel_override: spec.parallel_override,
@@ -1126,13 +1133,7 @@ pub(super) async fn start_local_openai_model(
             "the default DFlash draft does not fit beside the minimum context; serving without speculation"
         );
     }
-    anyhow::ensure!(
-        !plan
-            .breakdown
-            .as_ref()
-            .is_some_and(|breakdown| breakdown.measured_fit == Some(false)),
-        "measured native buffers leave no capacity for the minimum context under the current model configuration"
-    );
+    admit_local_plan(&plan, spec.capacity_reservation)?;
 
     if let Some(package) = package {
         start_local_package_v2_model(
@@ -1939,6 +1940,7 @@ mod tests {
             pinned_gpu: None,
             device_override: None,
             capacity_budget_bytes: Some(1),
+            capacity_reservation: None,
             cache_type_k_override: None,
             cache_type_v_override: None,
             n_batch_override: None,

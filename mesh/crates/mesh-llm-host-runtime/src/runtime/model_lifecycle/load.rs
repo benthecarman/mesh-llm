@@ -669,6 +669,7 @@ pub(crate) async fn run_auto_load_runtime_model(
             pinned_gpu,
             device_override: device_override.clone(),
             capacity_budget_bytes: Some(capacity_budget_bytes),
+            capacity_reservation: Some(&capacity_reservation),
             cache_type_k_override: model_overrides.and_then(|m| m.cache_type_k.as_deref()),
             cache_type_v_override: model_overrides.and_then(|m| m.cache_type_v.as_deref()),
             n_batch_override: model_overrides.and_then(|m| m.batch),
