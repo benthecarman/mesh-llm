@@ -69,7 +69,10 @@ async fn document_ocr_console_preflight_and_methods() {
             format!("{method} /mesh/v1/documents/ocr HTTP/1.1\r\nHost: localhost\r\n\r\n"),
         )
         .await;
-        assert!(response.starts_with(&format!("HTTP/1.1 {status}")), "{response}");
+        assert!(
+            response.starts_with(&format!("HTTP/1.1 {status}")),
+            "{response}"
+        );
         handle.await.unwrap().unwrap();
     }
 }
@@ -428,9 +431,6 @@ async fn test_api_plugin_tools_allows_published_operation() {
 /// as a remote bridge while the connection is still alive, and whether the
 /// relayed response reaches the client with the sandboxing headers.
 
-
-
-
 #[tokio::test]
 async fn console_relay_sandboxes_upstream_responses_and_rejects_arbitrary_get() {
     let (upstream_port, _upstream_rx, upstream_handle) =
@@ -444,8 +444,14 @@ async fn console_relay_sandboxes_upstream_responses_and_rejects_arbitrary_get() 
     )
     .await;
     assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
-    assert!(response.contains("X-Content-Type-Options: nosniff\r\n"), "{response}");
-    assert!(response.contains("Content-Security-Policy: sandbox\r\n"), "{response}");
+    assert!(
+        response.contains("X-Content-Type-Options: nosniff\r\n"),
+        "{response}"
+    );
+    assert!(
+        response.contains("Content-Security-Policy: sandbox\r\n"),
+        "{response}"
+    );
     handle.abort();
     upstream_handle.abort();
 
@@ -460,4 +466,112 @@ async fn console_relay_sandboxes_upstream_responses_and_rejects_arbitrary_get() 
     .await;
     assert!(response.starts_with("HTTP/1.1 405"), "{response}");
     handle.abort();
+}
+
+/// Accept one connection, read a request with a `Content-Length` body as raw
+/// bytes, and answer `200`. Unlike [`spawn_capturing_upstream`] it does not
+/// parse or rewrite the request.
+async fn spawn_raw_capturing_upstream()
+-> (u16, oneshot::Receiver<Vec<u8>>, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (request_tx, request_rx) = oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut raw = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let body_start = loop {
+            if let Some(i) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                break i + 4;
+            }
+            let n = stream.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "upstream closed before request head");
+            raw.extend_from_slice(&chunk[..n]);
+        };
+        let head = String::from_utf8_lossy(&raw[..body_start]).to_ascii_lowercase();
+        let content_length: usize = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .map(|value| value.trim().parse().unwrap())
+            .unwrap_or(0);
+        while raw.len() < body_start + content_length {
+            let n = stream.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "upstream closed before request body");
+            raw.extend_from_slice(&chunk[..n]);
+        }
+        let _ = request_tx.send(raw);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+            .await
+            .unwrap();
+        let _ = stream.shutdown().await;
+    });
+    (port, request_rx, handle)
+}
+
+#[tokio::test]
+async fn console_chat_alias_forwards_body_bytes_unchanged() {
+    for (alias, target) in [
+        ("/api/chat", "/v1/chat/completions"),
+        ("/api/responses", "/v1/responses"),
+    ] {
+        let (upstream_port, upstream_rx, upstream_handle) = spawn_raw_capturing_upstream().await;
+        let state = build_test_mesh_api_with_api_port(upstream_port).await;
+        let (addr, handle) = spawn_management_test_server(state).await;
+        // Invalid UTF-8 must not be widened to U+FFFD: that would make the
+        // forwarded body longer than its Content-Length.
+        let body = b"{\"model\":\"m\",\"input\":\"\xff\xfe /api/chat\"}";
+        let head = format!(
+            "POST {alias}?trace=1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(head.as_bytes()).await.unwrap();
+        stream.write_all(body).await.unwrap();
+        stream.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 200"), "{alias}");
+
+        let raw = tokio::time::timeout(Duration::from_secs(5), upstream_rx)
+            .await
+            .expect("console must forward the alias to inference")
+            .unwrap();
+        let expected_line = format!("POST {target}?trace=1 HTTP/1.1\r\n");
+        assert!(raw.starts_with(expected_line.as_bytes()), "{alias}");
+        let body_start = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        assert_eq!(&raw[body_start..], body, "{alias}");
+        handle.await.unwrap().unwrap();
+        upstream_handle.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn console_chat_alias_rejects_non_exact_paths() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = upstream.local_addr().unwrap().port();
+    let state = build_test_mesh_api_with_api_port(upstream_port).await;
+    for path in ["/api/chatty", "/api/chat/completions", "/api/responses/x"] {
+        let (addr, handle) = spawn_management_test_server(state.clone()).await;
+        let body = r#"{"model":"m"}"#;
+        let request = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        // Bounded so a regression that forwards to the silent listener fails
+        // instead of hanging.
+        let response = tokio::time::timeout(
+            Duration::from_secs(30),
+            send_management_request(addr, request),
+        )
+        .await
+        .expect("non-exact alias must be answered by the console");
+        assert!(response.starts_with("HTTP/1.1 404"), "{path}: {response}");
+        handle.await.unwrap().unwrap();
+    }
+    let accepted = tokio::time::timeout(Duration::from_millis(200), upstream.accept()).await;
+    assert!(
+        accepted.is_err(),
+        "non-exact alias must not reach inference"
+    );
 }
