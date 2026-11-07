@@ -7,7 +7,8 @@ use super::config::{ExternalPluginSpec, PluginHostMode};
 use super::plugin_manifest_overview;
 use super::support::{PluginTimeout, plugin_error, serialize_params, summarize_capabilities};
 use super::transport::{
-    LocalListener, LocalStream, bind_local_listener, connection_loop, reject_remote_control,
+    LocalListener, LocalStream, bind_local_listener, connection::connection_loop,
+    reject_remote_control,
 };
 use super::{
     PROTOCOL_VERSION, PluginMeshEvent, PluginRpcBridge, PluginSummary, PluginWebUiState,

@@ -20,6 +20,9 @@ pub(super) fn managed_models_from_env(
 }
 
 /// Keep downloading and disk IO off the connection's control loop.
+///
+/// `slot` is one of the connection's slots for plugin-started requests; the
+/// job holds it until it finishes.
 pub(super) fn prepare_for_connection(
     request_id: u64,
     request: proto::PrepareModelAssetsRequest,
@@ -27,8 +30,10 @@ pub(super) fn prepare_for_connection(
     generation: u64,
     runtime: Arc<Mutex<Option<PluginRuntime>>>,
     outbound: mpsc::Sender<proto::Envelope>,
+    slot: tokio::sync::OwnedSemaphorePermit,
 ) {
     tokio::spawn(async move {
+        let _slot = slot;
         let result = prepare_request(&request.plan_json, generation, &runtime).await;
         let payload = match result {
             Ok(assets) => match serde_json::to_string(&assets) {

@@ -14,7 +14,7 @@ async fn unverified_identity_requests_are_rejected_without_forwarding_to_mesh() 
     ] {
         forward_plugin_request(
             "impersonated-installed-plugin".into(),
-            123,
+            Admitted::for_test(123),
             proto::RpcRequest {
                 invocation_id: None,
                 method: method.into(),

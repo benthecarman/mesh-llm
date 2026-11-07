@@ -3,12 +3,16 @@ use super::*;
 
 pub(super) fn forward_request(
     plugin_name: String,
-    request_id: u64,
+    admitted: super::Admitted,
     request: super::proto::ModelRequirementRequest,
     mesh_tx: mpsc::Sender<PluginMeshEvent>,
     outbound_tx: mpsc::Sender<super::proto::Envelope>,
 ) {
     tokio::spawn(async move {
+        let super::Admitted {
+            request_id,
+            permit: _permit,
+        } = admitted;
         let (response_tx, response_rx) = oneshot::channel();
         let deadline = tokio::time::Instant::now() + PLUGIN_MESH_STREAM_RESPONSE_TIMEOUT;
         let response = match tokio::time::timeout_at(
