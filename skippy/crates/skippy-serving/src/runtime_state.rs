@@ -42,10 +42,9 @@ pub struct RuntimeState {
     layer_start: u32,
     layer_end: u32,
     lane_count: u32,
-    /// Size of the context's KV cell pool, in tokens (llama.cpp `n_ctx`). In
-    /// unified-KV mode every lane draws decode/prefill cells from this single
-    /// shared pool, so it is the real ceiling for scheduler admission — see
-    /// [`Self::kv_pool_tokens`].
+    /// Per-lane context size, in tokens (the stage config `ctx_size`). Native
+    /// reserves it once per lane, so the context's KV cell pool is
+    /// `ctx_size × lane_count` — see [`Self::kv_cells_total`].
     ctx_size: u32,
     /// High-water mark of lane indices ever handed out. Combined with
     /// [`Self::free_lane_indices`], the count of live lanes equals
@@ -318,14 +317,25 @@ impl RuntimeState {
         self.sessions.len()
     }
 
-    /// Total KV cell pool available to this context, in tokens (`n_ctx`).
+    /// Per-lane context size, in tokens (the stage config `ctx_size`).
     ///
-    /// In unified-KV mode all lanes share this single pool, so it is the real
-    /// token budget the iteration scheduler must admit against. Returns 0 for
-    /// the modelless test runtime, in which case callers should fall back to a
-    /// configured default.
+    /// Native reserves this many KV cells for each lane; the whole pool is
+    /// [`Self::kv_cells_total`]. Returns 0 for the modelless test runtime, in
+    /// which case callers should fall back to a configured default.
     pub fn kv_pool_tokens(&self) -> u32 {
         self.ctx_size
+    }
+
+    /// KV cells in this context, in tokens: the per-lane `ctx_size` reserved
+    /// once per lane (native `n_ctx`).
+    ///
+    /// In unified-KV mode every lane draws prefill and decode cells from this
+    /// one pool, so it is what the iteration scheduler admits and decodes
+    /// against. Returns 0 for the modelless test runtime.
+    pub fn kv_cells_total(&self) -> usize {
+        usize::try_from(self.ctx_size)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(usize::try_from(self.lane_count).unwrap_or(usize::MAX))
     }
 
     #[cfg(test)]
@@ -827,13 +837,23 @@ mod tests {
 
     #[test]
     fn modelless_runtime_reports_zero_kv_pool_so_scheduler_uses_fallback() {
-        // The scheduler derives its admission budget from `kv_pool_tokens()` and
+        // The scheduler derives its admission budget from `kv_cells_total()` and
         // keeps its configured default when the runtime reports 0. The modelless
         // test runtime carries no context, so it must report 0 (not panic or
         // report a stale non-zero pool).
         let rt = RuntimeState::new_modelless_for_test(4);
         assert_eq!(rt.kv_pool_tokens(), 0);
+        assert_eq!(rt.kv_cells_total(), 0);
         assert_eq!(rt.lane_count(), 4);
+    }
+
+    #[test]
+    fn kv_cells_total_reserves_the_per_lane_context_for_every_lane() {
+        // Native sizes the context as `ctx_size × lane_count`; the scheduler
+        // must see that pool, not one lane's share of it.
+        let rt = RuntimeState::new_modelless_with_capacity_for_test(4, 4096);
+        assert_eq!(rt.kv_pool_tokens(), 4096);
+        assert_eq!(rt.kv_cells_total(), 16_384);
     }
 
     #[test]

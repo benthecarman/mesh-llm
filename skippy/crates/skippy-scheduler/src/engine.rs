@@ -7,6 +7,8 @@ use crate::{
     order_cache_aware_candidates,
 };
 
+mod reservation;
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AdmissionError {
     #[error("scheduler waiting queue is full ({capacity} requests)")]
@@ -119,6 +121,8 @@ impl Scheduler {
             return plan;
         }
         let mut budget = self.config.max_tokens_per_iteration;
+        let mut room = self.decode_room();
+        let mut waiting_for_room = Vec::new();
         let mut prefill_sequences = 0usize;
         let ids = self.active.keys().cloned().collect::<Vec<_>>();
         // llama's mixed-token ABI can batch many prefills or many decode rows,
@@ -188,23 +192,34 @@ impl Scheduler {
                 continue;
             }
 
-            if let Some(token) = sequence.pending_decode_token() {
-                plan.work.push(IterationWork {
-                    sequence_id: id,
-                    tokens: vec![token],
-                    positions: contiguous_positions(replay.len(), 1),
-                    sample_last: true,
-                    phase: IterationPhase::Decode,
-                    sampling: sequence.sampling.clone(),
-                });
-                // The token scheduled for decode occupies the next position.
-                // Keep the replay cursor aligned so uninterrupted sequences do
-                // not replay that token as recompute work on the next step.
-                sequence.prefill_cursor = replay.len().saturating_add(1);
-                plan.token_count += 1;
-                budget -= 1;
+            let Some(token) = sequence.pending_decode_token() else {
+                continue;
+            };
+            let context_tokens = replay.len().saturating_add(1);
+            if !self.reserve_decode_room(&mut room, &id, context_tokens) {
+                waiting_for_room.push(id);
+                continue;
             }
+            let Some(sequence) = self.active.get_mut(&id) else {
+                continue;
+            };
+            plan.work.push(IterationWork {
+                sequence_id: id,
+                tokens: vec![token],
+                positions: contiguous_positions(replay.len(), 1),
+                sample_last: true,
+                phase: IterationPhase::Decode,
+                sampling: sequence.sampling.clone(),
+            });
+            // The token scheduled for decode occupies the next position.
+            // Keep the replay cursor aligned so uninterrupted sequences do
+            // not replay that token as recompute work on the next step.
+            sequence.prefill_cursor = context_tokens;
+            plan.token_count += 1;
+            budget -= 1;
         }
+
+        self.fail_stalled_decode(&waiting_for_room, &mut plan);
 
         if plan
             .work
@@ -229,6 +244,8 @@ impl Scheduler {
 
     fn plan_mixed_iteration(&mut self, plan: &mut IterationPlan) {
         let mut budget = self.config.max_tokens_per_iteration;
+        let mut room = self.decode_room();
+        let mut waiting_for_room = Vec::new();
         let ids = self.active.keys().cloned().collect::<Vec<_>>();
 
         // Decode is latency-sensitive and consumes exactly one token per live
@@ -246,7 +263,7 @@ impl Scheduler {
             }
             decode_examined = offset + 1;
             let id = &ids[(decode_start + offset) % ids.len()];
-            let Some(sequence) = self.active.get_mut(id) else {
+            let Some(sequence) = self.active.get(id) else {
                 continue;
             };
             let replay_len = sequence.recompute_token_count();
@@ -254,6 +271,13 @@ impl Scheduler {
                 continue;
             }
             let Some(token) = sequence.pending_decode_token() else {
+                continue;
+            };
+            if !self.reserve_decode_room(&mut room, id, replay_len.saturating_add(1)) {
+                waiting_for_room.push(id.clone());
+                continue;
+            }
+            let Some(sequence) = self.active.get_mut(id) else {
                 continue;
             };
             plan.work.push(IterationWork {
@@ -310,6 +334,7 @@ impl Scheduler {
             budget -= count;
         }
 
+        self.fail_stalled_decode(&waiting_for_room, plan);
         self.consecutive_prefill_iterations = 0;
     }
 
@@ -568,7 +593,7 @@ impl Scheduler {
                 deferred.push_back(sequence);
                 continue;
             }
-            self.reserve_memory(&sequence);
+            self.reserve_memory(&mut sequence);
             sequence.status = SequenceStatus::Running;
             sequence.admitted_at = Some(Instant::now());
             self.active.insert(sequence.id.clone(), sequence);
@@ -577,45 +602,6 @@ impl Scheduler {
         self.waiting = deferred;
         self.refresh_counts();
         admitted
-    }
-
-    fn can_reserve_memory(&self, sequence: &Sequence) -> bool {
-        self.config
-            .memory_components
-            .iter()
-            .zip(self.component_used_bytes.iter().copied())
-            .all(|(component, used)| {
-                used.saturating_add(component.reservation_bytes(sequence.admission_tokens))
-                    <= component.available_bytes()
-            })
-    }
-
-    fn reserve_memory(&mut self, sequence: &Sequence) {
-        for (index, component) in self.config.memory_components.iter().enumerate() {
-            self.component_used_bytes[index] = self.component_used_bytes[index]
-                .saturating_add(component.reservation_bytes(sequence.admission_tokens));
-        }
-    }
-
-    fn release_memory(&mut self, sequence: &Sequence) {
-        for (index, component) in self.config.memory_components.iter().enumerate() {
-            self.component_used_bytes[index] = self.component_used_bytes[index]
-                .saturating_sub(component.reservation_bytes(sequence.admission_tokens));
-        }
-    }
-
-    fn remove_active(&mut self, id: &str) {
-        if let Some(sequence) = self.active.remove(id) {
-            self.release_memory(&sequence);
-        }
-    }
-
-    fn component_over_capacity(&self) -> bool {
-        self.config
-            .memory_components
-            .iter()
-            .zip(self.component_used_bytes.iter().copied())
-            .any(|(component, used)| used > component.available_bytes())
     }
 
     fn preemption_victim(&self) -> Option<String> {

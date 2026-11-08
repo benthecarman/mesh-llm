@@ -28,6 +28,27 @@ The `radix-fcfs` and `radix-cache-aware` scenarios seed the production
 request trace with and without cache-affinity ordering. Affinity is retained as
 a per-stage vector so split stages can score their own hits independently.
 
+## Decode room
+
+Admission reserves each sequence's `admission_tokens` in every memory
+component. Serving bounds that to the prompt plus a fixed decode headroom, so a
+long generation can outgrow its reservation. Before planning each decode, the
+scheduler checks that the tokens active sequences occupy, with this sequence
+one token longer, still fit. A sequence that fits grows its reservation, so
+later admissions see the room it holds. Growth can use room that other
+sequences reserved but do not occupy, so reserved bytes can exceed a
+component's capacity; admission then waits until sequences finish.
+
+A sequence that does not fit skips its decode and keeps its place, because a
+sequence that finishes frees room. Only when a plan has no work at all is one
+waiting sequence failed: the lowest priority, then the most recently admitted.
+It is listed in `IterationPlan::out_of_decode_room`, and the caller fails only
+that request.
+
+The check covers what this scheduler tracks. Serving work outside it, such as
+direct iterations on the same runtime, and native KV fragmentation can still
+fail a native batch. Serving then fails only the requests in that batch.
+
 ## Cache-aware admission
 
 Equal-priority waiting work is ranked by estimated prefill work saved minus

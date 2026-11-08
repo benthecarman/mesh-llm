@@ -44,6 +44,9 @@ pub struct Sequence {
     pub prefix_restore: Option<PrefixRestore>,
     pub cache_affinity: CacheAffinity,
     pub admitted_at: Option<Instant>,
+    /// Tokens this sequence holds in token-sized memory components while
+    /// active: its admission tokens, grown when a decode outgrows them.
+    pub(crate) reserved_tokens: usize,
     pub(crate) prefill_cursor: usize,
     pub(crate) enqueued_turn: u64,
     pub(crate) enqueue_order: u64,
@@ -72,6 +75,7 @@ impl Sequence {
             prefix_restore: None,
             cache_affinity: CacheAffinity::default(),
             admitted_at: None,
+            reserved_tokens: 0,
             prefill_cursor: 0,
             enqueued_turn: 0,
             enqueue_order: 0,
@@ -127,6 +131,13 @@ impl Sequence {
             .saturating_add(self.generated_tokens.len().saturating_sub(1))
     }
 
+    /// Tokens this sequence occupies once its scheduled work has run: the
+    /// whole replay (a prompt still prefilling will need all of it), or one
+    /// more when its next decode is already planned.
+    pub(crate) fn occupied_tokens(&self) -> usize {
+        self.prefill_cursor.max(self.recompute_token_count())
+    }
+
     pub(crate) fn pending_decode_token(&self) -> Option<i32> {
         self.generated_tokens.last().copied()
     }
@@ -171,4 +182,9 @@ pub struct IterationPlan {
     pub token_count: usize,
     pub admitted: usize,
     pub preempted: usize,
+    /// Sequences failed because their next decode had no room in a memory
+    /// component and no other work in the plan could progress to free it.
+    /// The scheduler has already released them; the caller must fail their
+    /// requests.
+    pub out_of_decode_room: Vec<String>,
 }

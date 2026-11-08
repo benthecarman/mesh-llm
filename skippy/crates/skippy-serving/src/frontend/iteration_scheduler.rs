@@ -3,6 +3,7 @@ mod detached_runtime;
 mod direct_batch;
 mod direct_execution;
 mod direct_reply;
+mod plan_execution;
 pub(crate) mod readout;
 
 use self::cache_runtime::{
@@ -416,7 +417,7 @@ impl IterationScheduler {
             let runtime = lock_runtime(&runtime);
             (
                 runtime.lane_count() as usize,
-                runtime.kv_pool_tokens() as usize,
+                runtime.kv_cells_total(),
                 runtime.compute_meter(),
             )
         };
@@ -1295,6 +1296,7 @@ impl SchedulerWorker {
 
         let iteration_started = Instant::now();
         let mut plan = self.scheduler.plan_iteration();
+        self.fail_out_of_decode_room(&plan);
         if plan.work.is_empty() {
             return;
         }
@@ -1318,7 +1320,7 @@ impl SchedulerWorker {
         let (configured, setup_failures) = match self.prepare_runtime_sessions(&setup) {
             Ok(result) => result,
             Err(error) => {
-                self.fail_all(error);
+                self.fail_plan_requests(&plan, &error);
                 return;
             }
         };
@@ -1343,7 +1345,7 @@ impl SchedulerWorker {
         let predicted = match result {
             Ok(predicted) => predicted,
             Err(error) => {
-                self.fail_all(error);
+                self.fail_plan_requests(&plan, &error);
                 return;
             }
         };
@@ -1583,56 +1585,6 @@ impl SchedulerWorker {
 
     fn record_compute(&self, elapsed: Duration) {
         self.compute_meter.record(elapsed);
-    }
-
-    fn execute_plan(
-        &self,
-        plan: &skippy_scheduler::IterationPlan,
-    ) -> InferenceResult<Vec<IterationPrediction>> {
-        let mut runtime = lock_runtime(&self.runtime);
-        let hold_started = Instant::now();
-        let requests = plan
-            .work
-            .iter()
-            .map(|work| RuntimeIterationBatchRequest {
-                session_id: &work.sequence_id,
-                token_ids: &work.tokens,
-                // Text-only serving leaves positions to the native runtime so
-                // model-specific widths (for example Qwen mRoPE's four
-                // position dimensions) are expanded correctly.
-                positions: &[],
-                sampling: work.sampling.as_ref(),
-                input: None,
-                sample_last: work.sample_last,
-                phase: match work.phase {
-                    IterationPhase::Decode => IterationBatchPhase::Decode,
-                    IterationPhase::Prefill | IterationPhase::Recompute => {
-                        IterationBatchPhase::Prefill
-                    }
-                },
-            })
-            .collect::<Vec<_>>();
-        let result = runtime.iteration_batch_sampled(&requests);
-        drop(runtime);
-        self.record_compute(hold_started.elapsed());
-        let decode_steps = plan
-            .work
-            .iter()
-            .filter(|work| work.phase == IterationPhase::Decode)
-            .count();
-        self.compute_meter.record_decode_tokens(decode_steps as u64);
-        result
-            .map(|outputs| {
-                outputs
-                    .samples
-                    .into_iter()
-                    .map(|sample| IterationPrediction {
-                        work_index: sample.request_index,
-                        token: sample.predicted_token,
-                    })
-                    .collect()
-            })
-            .map_err(openai_backend_error)
     }
 
     fn fail_all(&mut self, error: InferenceError) {
