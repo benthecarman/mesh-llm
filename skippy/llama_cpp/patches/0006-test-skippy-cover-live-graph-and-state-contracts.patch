@@ -1,4 +1,4 @@
-From c543b957d8b5315b2ad1429872b371d4d8b547b3 Mon Sep 17 00:00:00 2001
+From 1323f3f43f8ecc9b8a1feb1fb08d6f49c83f4458 Mon Sep 17 00:00:00 2001
 From: James Dumay <james@generalinference.xyz>
 Date: Tue, 13 Oct 2026 22:06:43 +1100
 Subject: [PATCH 06/32] test(skippy): cover live graph and state contracts
@@ -20,7 +20,7 @@ Subject: [PATCH 06/32] test(skippy): cover live graph and state contracts
  .../tests/renamed_multishard_planning.cpp     | 1667 +++++++++++++++++
  .../tests/residual_checkpoint_regression.h    |   52 +
  src/skippy/tests/runtime_events.cpp           |  697 +++++++
- src/skippy/tests/sampling_history.cpp         |  520 +++++
+ src/skippy/tests/sampling_history.cpp         |  609 ++++++
  src/skippy/tests/stage_plan_header.c          |   10 +
  src/skippy/tests/stage_plan_header.cpp        |   13 +
  src/skippy/tests/stage_slice_plan.cpp         | 1200 ++++++++++++
@@ -31,7 +31,7 @@ Subject: [PATCH 06/32] test(skippy): cover live graph and state contracts
  tests/test-graph-contract-fixture.h           |  155 ++
  tests/test-jinja.cpp                          |    5 +
  tests/test-llama-archs.cpp                    |  362 +++-
- tests/test-reasoning-budget.cpp               |   28 +-
+ tests/test-reasoning-budget.cpp               |  115 +-
  tests/test-skippy-activation-validation.cpp   |   18 +
  tests/test-skippy-cachegen-import.cpp         |  347 ++++
  tests/test-skippy-cachegen-metal.cpp          |  399 ++++
@@ -42,7 +42,7 @@ Subject: [PATCH 06/32] test(skippy): cover live graph and state contracts
  tests/test-skippy-rerank-template.cpp         |   34 +
  tests/test-skippy-sampling-suppress.cpp       |   90 +
  ...st-skippy-verify-checkpoint-retirement.cpp |   26 +
- 38 files changed, 10274 insertions(+), 32 deletions(-)
+ 38 files changed, 10450 insertions(+), 32 deletions(-)
  create mode 100644 src/skippy/tests/cast_destination_regression.h
  create mode 100644 src/skippy/tests/embedding_input_regression.h
  create mode 100644 src/skippy/tests/graph_build_inputs.cpp
@@ -6047,10 +6047,10 @@ index 000000000..d764514ed
 +}
 diff --git a/src/skippy/tests/sampling_history.cpp b/src/skippy/tests/sampling_history.cpp
 new file mode 100644
-index 000000000..b191ecf34
+index 000000000..578aa4597
 --- /dev/null
 +++ b/src/skippy/tests/sampling_history.cpp
-@@ -0,0 +1,520 @@
+@@ -0,0 +1,609 @@
 +#include "skippy.h"
 +#include "../runtime_types.h"
 +#include "../runtime_support.h"
@@ -6064,6 +6064,7 @@ index 000000000..b191ecf34
 +#include <cstdlib>
 +#include <cmath>
 +#include <cstring>
++#include <string>
 +#include <vector>
 +#include <limits>
 +
@@ -6526,6 +6527,93 @@ index 000000000..b191ecf34
 +    release(session);
 +}
 +
++std::vector<llama_token> tokenize(const llama_vocab * vocab, const std::string & text) {
++    std::vector<llama_token> tokens(text.size() + 1);
++    const auto count = llama_tokenize(vocab, text.data(), static_cast<int32_t>(text.size()),
++            tokens.data(), static_cast<int32_t>(tokens.size()), false, true);
++    CHECK(count > 0);
++    tokens.resize(static_cast<size_t>(count));
++    return tokens;
++}
++
++// generation_prompt is JSON-escaped; extra_fields starts with a comma when set.
++std::string reasoning_metadata(const std::string & generation_prompt, const std::string & end_tag,
++        const std::string & extra_fields = "") {
++    return R"({"supports_thinking":true,"thinking_start_tag":"<thk>","thinking_end_tags":[")" + end_tag +
++            R"("],"generation_prompt":")" + generation_prompt + "\"" + extra_fields + "}";
++}
++
++// Samples `count` tokens with a zero reasoning budget after a fixed prompt.
++// `generated` tokens follow the prompt in history and are replayed into the
++// fresh sampler as generated output before the first sample.
++std::vector<llama_token> sample_zero_budget(skippy_model * model, const std::string & metadata,
++        const std::vector<llama_token> & generated, size_t count) {
++    auto sampling = sampling_config();
++    sampling.reasoning_budget_tokens = 0;
++    std::vector<llama_token> history{1, 1, 1, 1, 2};
++    const auto prompt_count = history.size();
++    history.insert(history.end(), generated.begin(), generated.end());
++    auto * session = create(model);
++    skippy_error * error = nullptr;
++    const auto status = skippy_session_configure_chat_sampling(
++            session, &sampling, metadata.c_str(), prompt_count, &error);
++    ok(status, error);
++    CHECK(session->sampling_has_reasoning_budget);
++    prefill(session, std::vector<llama_token>(history.begin(), history.end() - 1));
++    std::vector<llama_token> sampled;
++    llama_token previous = history.back();
++    for (size_t i = 0; i < count; ++i) {
++        previous = decode(session, sampling, previous);
++        sampled.push_back(previous);
++    }
++    release(session);
++    return sampled;
++}
++
++// The generation prompt is prompt history for the reasoning budget. An open
++// "<thk>\n" block with a zero budget must force the end tag during
++// generation, not let the prompt newline consume the forced position.
++void reasoning_budget_prompt_history(skippy_model * model) {
++    const auto * vocab = llama_model_get_vocab(model->model);
++    // The fixture tokenizer hashes five-byte chunks, so these tags are one
++    // token each and "</think>" is two.
++    const auto start = tokenize(vocab, "<thk>");
++    const auto newline = tokenize(vocab, "\n");
++    const auto end = tokenize(vocab, "</tk>");
++    const auto long_end = tokenize(vocab, "</think>");
++    CHECK(start.size() == 1 && newline.size() == 1 && end.size() == 1 && long_end.size() == 2);
++    const std::vector<llama_token> distinct{start[0], newline[0], end[0], long_end[0], long_end[1], 42, 43, 44};
++    for (size_t i = 0; i < distinct.size(); ++i) {
++        for (size_t j = i + 1; j < distinct.size(); ++j) {
++            CHECK(distinct[i] != distinct[j]);
++        }
++    }
++    const auto token = [](llama_token id) { return std::to_string(id); };
++
++    // No grammar: the end tag is forced first, then the biased token 42 follows.
++    CHECK(sample_zero_budget(model, reasoning_metadata("<thk>\\n", "</tk>"), {}, 2)
++            == std::vector<llama_token>({end[0], 42}));
++    // A multi-token forced sequence is emitted from its first token.
++    CHECK(sample_zero_budget(model, reasoning_metadata("<thk>\\n", "</think>"), {}, 3)
++            == std::vector<llama_token>({long_end[0], long_end[1], 42}));
++    // Generated history replayed into a fresh sampler continues the forced sequence.
++    CHECK(sample_zero_budget(model, reasoning_metadata("<thk>\\n", "</think>"), {long_end[0]}, 2)
++            == std::vector<llama_token>({long_end[1], 42}));
++    // An end tag already in the prompt closes the block; nothing is forced.
++    CHECK(sample_zero_budget(model, reasoning_metadata("<thk>\\n\\n\\n\\n\\n</tk>", "</tk>"), {}, 1)
++            == std::vector<llama_token>({42}));
++    // Tools: the lazy grammar stays inactive until the forced end tag closes the block.
++    const std::string lazy = R"(,"grammar":"root ::= <[42]> <[43]> <[44]>","grammar_lazy":true,)"
++            R"("grammar_triggers":[{"type":0,"token":42}])";
++    CHECK(sample_zero_budget(model, reasoning_metadata("<thk>\\n", "</tk>", lazy), {}, 4)
++            == std::vector<llama_token>({end[0], 42, 43, 44}));
++    // A grammar spanning the reasoning block accepts the prompt prefill and the forced end tag.
++    const std::string spanning = R"(,"grammar":"root ::= <[)" + token(start[0]) + "]> <[" + token(newline[0]) +
++            "]> <[" + token(end[0]) + R"(]> <[42]> <[43]> <[44]>")";
++    CHECK(sample_zero_budget(model, reasoning_metadata("<thk>\\n", "</tk>", spanning), {}, 4)
++            == std::vector<llama_token>({end[0], 42, 43, 44}));
++}
++
 +} // namespace
 +
 +int main(int argc, char ** argv) {
@@ -6564,6 +6652,7 @@ index 000000000..b191ecf34
 +                verify_restore_keeps_sampler(model);
 +            }
 +            adapter_contracts(model);
++            reasoning_budget_prompt_history(model);
 +        }
 +    }
 +    error = nullptr;
@@ -9045,7 +9134,7 @@ index 1f4c8a46b..4f5fb29d6 100644
          if (kv_shift) {
              return test_kv_shift(arch_filter, seed, stdev, verbosity);
 diff --git a/tests/test-reasoning-budget.cpp b/tests/test-reasoning-budget.cpp
-index a50a10824..01999dc05 100644
+index a50a10824..e489a40d1 100644
 --- a/tests/test-reasoning-budget.cpp
 +++ b/tests/test-reasoning-budget.cpp
 @@ -1,5 +1,6 @@
@@ -9096,6 +9185,107 @@ index a50a10824..01999dc05 100644
      // forced_tokens not ending with a known end sequence records nothing
      {
          auto * sampler = common_reasoning_budget_init(nullptr, start, end, {102}, 0, REASONING_BUDGET_FORCING);
+@@ -350,6 +374,92 @@ static void test_reasoning_budget_end_match() {
+     fprintf(stderr, "  Test 'matched end sequence' passed\n");
+ }
+ 
++// Prompt history, such as an open "<think>\n" generation prompt, never consumes
++// the forced end sequence; generation emits all of it.
++static void test_reasoning_budget_prompt_history() {
++    const std::vector<llama_tokens> start = {{100}};
++    const llama_token newline = 10;
++
++    // budget=0 and an open block: the prompt newline is not the forced end tag
++    {
++        auto * sampler = common_reasoning_budget_init(nullptr, start, {{101}}, {101}, 0, REASONING_BUDGET_IDLE);
++
++        common_reasoning_budget_accept_prompt(sampler, 100); // FORCING
++        common_reasoning_budget_accept_prompt(sampler, newline);
++        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_FORCING);
++
++        GGML_ASSERT(get_forced_token(sampler, 110) == 101 && "prompt history consumed the forced end tag");
++        llama_sampler_accept(sampler, 101);
++        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_DONE);
++        const auto * matched = common_reasoning_budget_get_end_match(sampler);
++        GGML_ASSERT(matched != nullptr && *matched == llama_tokens({101}));
++
++        llama_sampler_free(sampler);
++    }
++
++    // a multi-token forced sequence with a suffix after the end tag is emitted in full, from its first token
++    {
++        const llama_tokens forced = {103, 101, 104, newline};
++        auto * sampler = common_reasoning_budget_init(nullptr, start, {{103, 101}}, forced, 0, REASONING_BUDGET_IDLE);
++
++        common_reasoning_budget_accept_prompt(sampler, 100);
++        common_reasoning_budget_accept_prompt(sampler, newline);
++        for (const llama_token token : forced) {
++            GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_FORCING);
++            GGML_ASSERT(get_forced_token(sampler, 110) == token);
++            llama_sampler_accept(sampler, token);
++        }
++        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_DONE);
++        const auto * matched = common_reasoning_budget_get_end_match(sampler);
++        GGML_ASSERT(matched != nullptr && *matched == llama_tokens({103, 101}));
++
++        llama_sampler_free(sampler);
++    }
++
++    // an end tag already in the prompt closes the block after other prompt tokens; nothing is forced
++    {
++        auto * sampler = common_reasoning_budget_init(nullptr, start, {{103, 101}}, {103, 101}, 0, REASONING_BUDGET_IDLE);
++
++        for (const llama_token token : {(llama_token) 100, newline, (llama_token) 103}) {
++            common_reasoning_budget_accept_prompt(sampler, token);
++            GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_FORCING);
++        }
++        common_reasoning_budget_accept_prompt(sampler, 101);
++        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_DONE);
++        const auto * matched = common_reasoning_budget_get_end_match(sampler);
++        GGML_ASSERT(matched != nullptr && *matched == llama_tokens({103, 101}));
++
++        llama_token_data candidates[] = {{101, 0.0f, 0.0f}, {103, 0.0f, 0.0f}, {newline, 0.0f, 0.0f}};
++        llama_token_data_array view = {candidates, 3, -1, false};
++        llama_sampler_apply(sampler, &view);
++        for (const auto & candidate : candidates) {
++            GGML_ASSERT(std::isfinite(candidate.logit) && "a closed block must not force tokens");
++        }
++
++        llama_sampler_free(sampler);
++    }
++
++    // a finite budget: the prompt opens the block and generation still counts down to forcing
++    {
++        auto * sampler = common_reasoning_budget_init(nullptr, start, {{101}}, {101}, 2, REASONING_BUDGET_IDLE);
++
++        common_reasoning_budget_accept_prompt(sampler, 100); // COUNTING, remaining=2
++        common_reasoning_budget_accept_prompt(sampler, newline); // remaining=1
++        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_COUNTING);
++        llama_sampler_accept(sampler, 50); // budget exhausted, FORCING
++        GGML_ASSERT(get_forced_token(sampler, 110) == 101);
++        llama_sampler_accept(sampler, 101);
++        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_DONE);
++
++        llama_sampler_free(sampler);
++    }
++
++    // a null sampler is safely ignored
++    common_reasoning_budget_accept_prompt(nullptr, 100);
++
++    fprintf(stderr, "  Test 'prompt history' passed\n");
++}
++
+ // UTF-8 boundary detection unit test
+ // Tests common_utf8_is_complete() from reasoning-budget.h
+ static void test_utf8_boundary_detection() {
+@@ -511,6 +621,7 @@ int main(void) {
+     test_reasoning_budget_clone_mid_forcing();
+     test_reasoning_budget_force_manual();
+     test_reasoning_budget_end_match();
++    test_reasoning_budget_prompt_history();
+ 
+     printf("OK (12 tests passed)\n");
+ 
 diff --git a/tests/test-skippy-activation-validation.cpp b/tests/test-skippy-activation-validation.cpp
 new file mode 100644
 index 000000000..7466f03c1

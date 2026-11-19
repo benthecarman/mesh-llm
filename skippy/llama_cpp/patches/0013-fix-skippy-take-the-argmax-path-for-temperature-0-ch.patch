@@ -1,4 +1,4 @@
-From 3960653d9909ba978fb9735923d1563392968b38 Mon Sep 17 00:00:00 2001
+From d45588e32caa8686f51aed2d7c26eb7ed7a9f36b Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Thu, 29 Oct 2026 19:55:52 -0400
 Subject: [PATCH 13/32] fix(skippy): take the argmax path for temperature-0
@@ -338,7 +338,7 @@ index 000000000..d06000f11
 +        int32_t n_vocab,
 +        const skippy_argmax_plan & plan);
 diff --git a/src/skippy/tests/sampling_history.cpp b/src/skippy/tests/sampling_history.cpp
-index b191ecf34..5ae8e15b4 100644
+index 578aa4597..4603051f3 100644
 --- a/src/skippy/tests/sampling_history.cpp
 +++ b/src/skippy/tests/sampling_history.cpp
 @@ -1,5 +1,7 @@
@@ -349,7 +349,7 @@ index b191ecf34..5ae8e15b4 100644
  #include "../runtime_support.h"
  #include "llama-model.h"
  #include "../../../common/sampling.h"
-@@ -290,6 +292,108 @@ void penalty_restore(skippy_model * model, bool full) {
+@@ -291,6 +293,108 @@ void penalty_restore(skippy_model * model, bool full) {
      release(restored);
  }
  
@@ -458,7 +458,7 @@ index b191ecf34..5ae8e15b4 100644
  
  int32_t stage_layers(skippy_session * session) {
      return session->stage_model->model->hparams.n_layer();
-@@ -444,6 +548,7 @@ void adapter_contracts(skippy_model * model) {
+@@ -445,6 +549,7 @@ void adapter_contracts(skippy_model * model) {
      error = nullptr;
  
      config = sampling_config();
@@ -466,7 +466,7 @@ index b191ecf34..5ae8e15b4 100644
      config.ignore_eos = 1;
      config.logit_bias_count = 3;
      const auto * vocab = llama_model_get_vocab(model->model);
-@@ -479,7 +584,8 @@ int main(int argc, char ** argv) {
+@@ -567,7 +672,8 @@ int main(int argc, char ** argv) {
      CHECK(argc == 4);
      const bool grammar = std::strcmp(argv[2], "grammar") == 0;
      const bool state = std::strcmp(argv[2], "state") == 0;
@@ -476,7 +476,7 @@ index b191ecf34..5ae8e15b4 100644
      CHECK(std::strcmp(argv[3], "dense") == 0 || std::strcmp(argv[3], "recurrent") == 0);
      require_recurrent = std::strcmp(argv[3], "recurrent") == 0;
      auto config = skippy_runtime_config_default();
-@@ -494,6 +600,8 @@ int main(int argc, char ** argv) {
+@@ -582,6 +688,8 @@ int main(int argc, char ** argv) {
          // partial side payload is intentionally empty there.
          CHECK(require_recurrent);
          state_round_trip(model);
