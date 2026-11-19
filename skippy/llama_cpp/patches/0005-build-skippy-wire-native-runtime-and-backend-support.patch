@@ -1,4 +1,4 @@
-From cd9d11ee766add664032e1b29966215260bc54e7 Mon Sep 17 00:00:00 2001
+From 7721431d04b8402776a4b725764166abc4028af7 Mon Sep 17 00:00:00 2001
 From: James Dumay <james@generalinference.xyz>
 Date: Tue, 13 Oct 2026 22:06:42 +1100
 Subject: [PATCH 05/32] build(skippy): wire native runtime and backend support
@@ -15,8 +15,9 @@ Subject: [PATCH 05/32] build(skippy): wire native runtime and backend support
  common/ngram-cache.cpp                     | 158 ++++-
  common/peg-parser.cpp                      | 337 +++++++++++
  common/peg-parser.h                        |   8 +
- common/reasoning-budget.cpp                | 138 +++--
- common/reasoning-budget.h                  |  16 +-
+ common/reasoning-budget.cpp                | 154 +++--
+ common/reasoning-budget.h                  |  23 +-
+ common/sampling.cpp                        |   4 +-
  common/stage-chat.cpp                      | 363 +++++++++++
  ggml/cmake/common.cmake                    |   9 +-
  ggml/include/ggml-backend.h                |  27 +
@@ -35,7 +36,7 @@ Subject: [PATCH 05/32] build(skippy): wire native runtime and backend support
  tools/mtmd/mtmd-helper.cpp                 |  47 +-
  tools/mtmd/mtmd-helper.h                   |  29 +
  tools/mtmd/mtmd-subcontext.cpp             |   4 +
- 31 files changed, 3142 insertions(+), 152 deletions(-)
+ 32 files changed, 3165 insertions(+), 156 deletions(-)
  create mode 100644 common/stage-chat.cpp
  create mode 100644 ggml/src/ggml-cuda/cachegen.cu
  create mode 100644 ggml/src/ggml-cuda/cachegen.cuh
@@ -1048,7 +1049,7 @@ index 46df99875..5b41e7eba 100644
  
    private:
 diff --git a/common/reasoning-budget.cpp b/common/reasoning-budget.cpp
-index 81b7c3e56..674bb914d 100644
+index 81b7c3e56..e7b94243b 100644
 --- a/common/reasoning-budget.cpp
 +++ b/common/reasoning-budget.cpp
 @@ -1,9 +1,4 @@
@@ -1107,8 +1108,7 @@ index 81b7c3e56..674bb914d 100644
 +        recent.push_back(token);
 +        if (recent.size() > max_length) {
 +            recent.erase(recent.begin());
-         }
--        return p;
++        }
 +        int32_t match = -1;
 +        size_t match_length = 0;
 +        for (size_t i = 0; i < seqs.size(); ++i) {
@@ -1121,7 +1121,8 @@ index 81b7c3e56..674bb914d 100644
 +        }
 +        if (match >= 0) {
 +            recent.clear();
-+        }
+         }
+-        return p;
 +        return match;
      }
  
@@ -1168,15 +1169,19 @@ index 81b7c3e56..674bb914d 100644
  
      int32_t budget;           // maximum tokens in reasoning block
      int32_t remaining;        // tokens remaining in budget
-@@ -63,6 +95,7 @@ struct common_reasoning_budget_ctx {
+@@ -71,21 +103,18 @@ static const char * common_reasoning_budget_name(const struct llama_sampler * /*
+     return "reasoning-budget";
+ }
  
-     // for forcing
-     size_t force_pos;         // next position in forced_tokens to force
-+    bool forcing_started;       // distinguishes generated forcing from prompt-history accepts
- 
-     int32_t end_match;        // index into end_matcher.seqs of the sequence that transitioned to DONE, -1 if none
- };
-@@ -80,12 +113,10 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
+-static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_token token) {
+-    auto * ctx = (common_reasoning_budget_ctx *) smpl->ctx;
+-
++// Prompt history (generated == false) follows the same transitions, except that
++// it never advances the forced sequence: only generation emits forced tokens.
++static void reasoning_budget_accept(common_reasoning_budget_ctx * ctx, llama_token token, bool generated) {
+     switch (ctx->state) {
+         case REASONING_BUDGET_IDLE:
+         {
              if (ctx->start_matcher.advance(token) >= 0) {
                  ctx->state = REASONING_BUDGET_COUNTING;
                  ctx->remaining = ctx->budget;
@@ -1186,11 +1191,10 @@ index 81b7c3e56..674bb914d 100644
                      ctx->state = REASONING_BUDGET_FORCING;
                      ctx->force_pos = 0;
 -                    COM_TRC("%s", "budget=0, forcing immediately\n");
-+                    ctx->forcing_started = false;
                  }
              }
              break;
-@@ -97,22 +128,21 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
+@@ -97,14 +126,13 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
              if (match >= 0) {
                  ctx->state = REASONING_BUDGET_DONE;
                  ctx->end_match = match;
@@ -1207,20 +1211,17 @@ index 81b7c3e56..674bb914d 100644
              }
  
              if (ctx->state == REASONING_BUDGET_WAITING_UTF8) {
-                 if (utf8_complete) {
+@@ -112,7 +140,6 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
                      ctx->state = REASONING_BUDGET_FORCING;
                      ctx->force_pos = 0;
-+                    ctx->forcing_started = false;
                      ctx->end_matcher.reset();
 -                    COM_TRC("%s", "UTF-8 complete, now forcing end sequence\n");
                  }
              } else if (ctx->state == REASONING_BUDGET_COUNTING) {
                  ctx->remaining--;
-@@ -120,12 +150,11 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
-                     if (utf8_complete) {
+@@ -121,11 +148,9 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
                          ctx->state = REASONING_BUDGET_FORCING;
                          ctx->force_pos = 0;
-+                        ctx->forcing_started = false;
                          ctx->end_matcher.reset();
 -                        COM_TRC("%s", "budget exhausted, forcing end sequence\n");
                      } else {
@@ -1230,24 +1231,33 @@ index 81b7c3e56..674bb914d 100644
                      }
                  }
              }
-@@ -136,11 +165,12 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
+@@ -135,12 +160,21 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
+         {
              // track the end sequence within forced_tokens so it is also reported on DONE
              const int32_t match = ctx->end_matcher.advance(token);
++            if (match >= 0) {
++                ctx->end_match = match;
++            }
++            if (!generated) {
++                // Prompt history can already close the block, but it is not
++                // the forced sequence: generation must still emit all of it.
++                if (match >= 0) {
++                    ctx->state = REASONING_BUDGET_DONE;
++                }
++                break;
++            }
++            // Generated forcing also emits any suffix after the end sequence.
              ctx->force_pos++;
 -            // an end tag that is already in the prompt (e.g. "<think></think>") also ends forcing
 -            if (match >= 0 || ctx->force_pos >= ctx->forced_tokens.size()) {
--                ctx->state = REASONING_BUDGET_DONE;
-+            if (match >= 0) {
-                 ctx->end_match = match;
++            if (ctx->force_pos >= ctx->forced_tokens.size()) {
+                 ctx->state = REASONING_BUDGET_DONE;
+-                ctx->end_match = match;
 -                COM_TRC("%s", "forced sequence complete, done\n");
-+            }
-+            // Prompt history can already close the block. Generated forcing must also emit its suffix.
-+            if ((!ctx->forcing_started && match >= 0) || ctx->force_pos >= ctx->forced_tokens.size()) {
-+                ctx->state = REASONING_BUDGET_DONE;
              }
              break;
          }
-@@ -152,12 +182,10 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
+@@ -152,18 +186,19 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
                  ctx->remaining = ctx->budget;
                  ctx->end_matcher.reset();
                  ctx->end_match = -1;
@@ -1257,24 +1267,20 @@ index 81b7c3e56..674bb914d 100644
                      ctx->state = REASONING_BUDGET_FORCING;
                      ctx->force_pos = 0;
 -                    COM_TRC("%s", "budget=0, forcing immediately\n");
-+                    ctx->forcing_started = false;
                  }
              }
              break;
-@@ -176,6 +204,7 @@ static void common_reasoning_budget_apply(struct llama_sampler * smpl, llama_tok
-         return;
      }
+ }
  
-+    ctx->forcing_started = true;
-     const llama_token forced = ctx->forced_tokens[ctx->force_pos];
++static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_token token) {
++    reasoning_budget_accept((common_reasoning_budget_ctx *) smpl->ctx, token, true);
++}
++
+ static void common_reasoning_budget_apply(struct llama_sampler * smpl, llama_token_data_array * cur_p) {
+     auto * ctx = (common_reasoning_budget_ctx *) smpl->ctx;
  
-     // set all logits to -inf except the forced token
-@@ -193,12 +222,13 @@ static void common_reasoning_budget_reset(struct llama_sampler * smpl) {
-     ctx->start_matcher.reset();
-     ctx->end_matcher.reset();
-     ctx->force_pos = 0;
-+    ctx->forcing_started = false;
-     ctx->end_match = -1;
+@@ -197,8 +232,8 @@ static void common_reasoning_budget_reset(struct llama_sampler * smpl) {
  }
  
  static struct llama_sampler * common_reasoning_budget_init_state(
@@ -1285,7 +1291,7 @@ index 81b7c3e56..674bb914d 100644
          int32_t budget, common_reasoning_budget_state initial_state);
  
  static struct llama_sampler * common_reasoning_budget_clone(const struct llama_sampler * smpl);
-@@ -233,9 +263,9 @@ static struct llama_sampler * common_reasoning_budget_clone(const struct llama_s
+@@ -233,9 +268,9 @@ static struct llama_sampler * common_reasoning_budget_clone(const struct llama_s
  
  static struct llama_sampler * common_reasoning_budget_init_state(
          const struct llama_vocab        * vocab,
@@ -1298,15 +1304,7 @@ index 81b7c3e56..674bb914d 100644
          int32_t                           budget,
          common_reasoning_budget_state     initial_state) {
      // promote COUNTING with budget <= 0 to FORCING
-@@ -254,6 +284,7 @@ static struct llama_sampler * common_reasoning_budget_init_state(
-             /* .remaining     = */ budget,
-             /* .state         = */ initial_state,
-             /* .force_pos     = */ 0,
-+            /* .forcing_started = */ false,
-             /* .end_match     = */ -1,
-         }
-     );
-@@ -261,9 +292,9 @@ static struct llama_sampler * common_reasoning_budget_init_state(
+@@ -261,9 +296,9 @@ static struct llama_sampler * common_reasoning_budget_init_state(
  
  struct llama_sampler * common_reasoning_budget_init(
          const struct llama_vocab        * vocab,
@@ -1319,7 +1317,7 @@ index 81b7c3e56..674bb914d 100644
          int32_t                           budget,
          common_reasoning_budget_state     initial_state) {
      return common_reasoning_budget_init_state(vocab, start_seqs, end_seqs, forced_tokens, budget, initial_state);
-@@ -276,13 +307,13 @@ common_reasoning_budget_state common_reasoning_budget_get_state(const struct lla
+@@ -276,13 +311,13 @@ common_reasoning_budget_state common_reasoning_budget_get_state(const struct lla
      return ((const common_reasoning_budget_ctx *)smpl->ctx)->state;
  }
  
@@ -1335,18 +1333,23 @@ index 81b7c3e56..674bb914d 100644
          return nullptr;
      }
  
-@@ -304,8 +335,7 @@ bool common_reasoning_budget_force(struct llama_sampler * smpl) {
- 
+@@ -305,7 +340,12 @@ bool common_reasoning_budget_force(struct llama_sampler * smpl) {
      ctx->state = REASONING_BUDGET_FORCING;
      ctx->force_pos = 0;
-+    ctx->forcing_started = false;
      ctx->end_matcher.reset();
 -    COM_TRC("%s", "forced into forcing state (manual transition)\n");
 -
      return true;
  }
++
++void common_reasoning_budget_accept_prompt(struct llama_sampler * smpl, llama_token token) {
++    if (!smpl) {
++        return;
++    }
++    reasoning_budget_accept((common_reasoning_budget_ctx *) smpl->ctx, token, false);
++}
 diff --git a/common/reasoning-budget.h b/common/reasoning-budget.h
-index 1b89a04c4..85d5c35dc 100644
+index 1b89a04c4..dce2df298 100644
 --- a/common/reasoning-budget.h
 +++ b/common/reasoning-budget.h
 @@ -2,8 +2,6 @@
@@ -1358,7 +1361,7 @@ index 1b89a04c4..85d5c35dc 100644
  #include <cstdint>
  #include <vector>
  
-@@ -33,20 +31,20 @@ enum common_reasoning_budget_state {
+@@ -33,20 +31,27 @@ enum common_reasoning_budget_state {
  //   budget         - max tokens allowed in the reasoning block
  //   initial_state  - initial state
  //
@@ -1386,6 +1389,29 @@ index 1b89a04c4..85d5c35dc 100644
  // Returns true if the transition occurred.
 -bool common_reasoning_budget_force(struct llama_sampler * smpl);
 +LLAMA_API bool common_reasoning_budget_force(struct llama_sampler * smpl);
++
++// Accept a token from prompt history, such as the generation prompt the chat
++// template already placed after the last message. Prompt history moves the
++// sampler between states like a generated token and can close the block with
++// an end sequence, but it never advances the forced sequence: that is emitted
++// only by generation. Use llama_sampler_accept for generated tokens.
++LLAMA_API void common_reasoning_budget_accept_prompt(struct llama_sampler * smpl, llama_token token);
+diff --git a/common/sampling.cpp b/common/sampling.cpp
+index 72375bd35..20771dd26 100644
+--- a/common/sampling.cpp
++++ b/common/sampling.cpp
+@@ -323,8 +323,10 @@ struct common_sampler * common_sampler_init(
+             params.reasoning_budget_forced,
+             params.reasoning_budget_tokens < 0 ? INT_MAX : params.reasoning_budget_tokens);
+ 
++        // The generation prompt is prompt history: it can open or close the
++        // reasoning block, but must not consume the forced end sequence.
+         for (const auto & token : prefill_tokens) {
+-            llama_sampler_accept(rbudget, token);
++            common_reasoning_budget_accept_prompt(rbudget, token);
+             LOG_DBG("%s: reasoning-budget accepted prefill token (%d)\n", __func__, token);
+         }
+     }
 diff --git a/common/stage-chat.cpp b/common/stage-chat.cpp
 new file mode 100644
 index 000000000..c3362e2a7

@@ -1,4 +1,4 @@
-From bf3f7c50c6f91dec75704e4c79bbe91f8f4542bb Mon Sep 17 00:00:00 2001
+From c543b957d8b5315b2ad1429872b371d4d8b547b3 Mon Sep 17 00:00:00 2001
 From: James Dumay <james@generalinference.xyz>
 Date: Tue, 13 Oct 2026 22:06:43 +1100
 Subject: [PATCH 06/32] test(skippy): cover live graph and state contracts
@@ -31,7 +31,7 @@ Subject: [PATCH 06/32] test(skippy): cover live graph and state contracts
  tests/test-graph-contract-fixture.h           |  155 ++
  tests/test-jinja.cpp                          |    5 +
  tests/test-llama-archs.cpp                    |  362 +++-
- tests/test-reasoning-budget.cpp               |   24 +
+ tests/test-reasoning-budget.cpp               |   28 +-
  tests/test-skippy-activation-validation.cpp   |   18 +
  tests/test-skippy-cachegen-import.cpp         |  347 ++++
  tests/test-skippy-cachegen-metal.cpp          |  399 ++++
@@ -42,7 +42,7 @@ Subject: [PATCH 06/32] test(skippy): cover live graph and state contracts
  tests/test-skippy-rerank-template.cpp         |   34 +
  tests/test-skippy-sampling-suppress.cpp       |   90 +
  ...st-skippy-verify-checkpoint-retirement.cpp |   26 +
- 38 files changed, 10272 insertions(+), 30 deletions(-)
+ 38 files changed, 10274 insertions(+), 32 deletions(-)
  create mode 100644 src/skippy/tests/cast_destination_regression.h
  create mode 100644 src/skippy/tests/embedding_input_regression.h
  create mode 100644 src/skippy/tests/graph_build_inputs.cpp
@@ -9045,7 +9045,7 @@ index 1f4c8a46b..4f5fb29d6 100644
          if (kv_shift) {
              return test_kv_shift(arch_filter, seed, stdev, verbosity);
 diff --git a/tests/test-reasoning-budget.cpp b/tests/test-reasoning-budget.cpp
-index a50a10824..e87e0b064 100644
+index a50a10824..01999dc05 100644
 --- a/tests/test-reasoning-budget.cpp
 +++ b/tests/test-reasoning-budget.cpp
 @@ -1,5 +1,6 @@
@@ -9055,6 +9055,17 @@ index a50a10824..e87e0b064 100644
  
  #include "llama.h"
  #include "ggml.h"
+@@ -322,8 +323,8 @@ static void test_reasoning_budget_end_match() {
+ 
+         auto * sampler = common_reasoning_budget_init(nullptr, start, end_nl, {103, 101}, 0, REASONING_BUDGET_IDLE);
+ 
+-        llama_sampler_accept(sampler, 100); // FORCING
+-        llama_sampler_accept(sampler, 101); // end tag from the prompt, DONE
++        common_reasoning_budget_accept_prompt(sampler, 100); // FORCING
++        common_reasoning_budget_accept_prompt(sampler, 101); // end tag from the prompt, DONE
+         GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_DONE);
+ 
+         const llama_tokens * matched = common_reasoning_budget_get_end_match(sampler);
 @@ -333,6 +334,29 @@ static void test_reasoning_budget_end_match() {
          llama_sampler_free(sampler);
      }
